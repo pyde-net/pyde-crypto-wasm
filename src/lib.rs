@@ -631,7 +631,7 @@ pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<St
         .unwrap_or_default();
 
     // Compute EncryptedTx::hash — MUST match
-    // `pyde-mempool::encrypted::EncryptedTx::hash`:
+    // `pyde_rust_sdk::encrypted_wire::EncryptedTx::hash`:
     //   poseidon2(sender || nonce_le || gas_le || chain_le || ct_hash)
     // where ct_hash = poseidon2(ciphertext::to_bytes()).
     let ct_for_hash = ct.to_bytes(); // no length prefixes — matches Rust
@@ -653,7 +653,7 @@ pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<St
     let signature = sig.as_bytes().to_vec();
 
     // Serialize wire bytes. MUST match
-    // `pyde-mempool::encrypted::EncryptedTx::to_bytes`.
+    // `pyde_rust_sdk::encrypted_wire::EncryptedTx::to_bytes`.
     let mut buf = Vec::new();
     buf.extend_from_slice(&sender);
     buf.extend_from_slice(&nonce.to_le_bytes());
@@ -679,9 +679,9 @@ pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<St
 }
 
 /// Serialize one access-list entry for an EncryptedTx. Layout mirrors
-/// `pyde-mempool::encrypted::EncryptedTx::to_bytes` which uses u16
-/// read/write counts (distinct from the Transaction wire format which
-/// uses u32 here).
+/// `pyde_rust_sdk::encrypted_wire::EncryptedTx::to_bytes` which uses
+/// u16 read/write counts (distinct from the Transaction wire format
+/// which uses u32 here).
 fn serialize_encrypted_tx_access_entry(
     entry: &serde_json::Value,
     buf: &mut Vec<u8>,
@@ -770,9 +770,9 @@ fn parse_hex_bytes(val: Option<&serde_json::Value>) -> Vec<u8> {
 //
 // These run only on the native target (not in the wasm bundle). The
 // assertion is: wire bytes produced by our inlined WASM builder must
-// decode cleanly with `pyde-mempool`'s real `EncryptedTx::from_bytes`,
-// with every field intact. This catches silent format drift between
-// WASM and the node.
+// decode cleanly with the canonical `pyde_rust_sdk::encrypted_wire`
+// decoder, with every field intact. This catches silent format drift
+// between the two inlined copies.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,11 +802,11 @@ mod tests {
         let wire_hex = build_raw_encrypted_tx_wasm(&params.to_string(), &sk_hex).unwrap();
         let wire_bytes = hex::decode(wire_hex.trim_start_matches("0x")).unwrap();
 
-        // Decode with the REAL decoder from pyde-mempool. If this
+        // Decode with the canonical rust-sdk decoder. If this
         // succeeds and every field matches, the WASM wire format
-        // is byte-compatible with the node.
-        let decoded = pyde_mempool::encrypted::EncryptedTx::from_bytes(&wire_bytes)
-            .expect("production decoder must accept WASM-built bytes");
+        // is byte-compatible with the SDK / node-side reader.
+        let decoded = pyde_rust_sdk::encrypted_wire::EncryptedTx::from_bytes(&wire_bytes)
+            .expect("canonical decoder must accept WASM-built bytes");
 
         assert_eq!(decoded.sender, sender);
         assert_eq!(decoded.nonce, 7);
