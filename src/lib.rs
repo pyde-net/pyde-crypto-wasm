@@ -151,9 +151,10 @@ pub fn sign_message_with_handle(handle: u32, message_hex: &str) -> Result<String
     let table = key_table()
         .lock()
         .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
-    let sk = table.keys.get(&handle).ok_or_else(|| {
-        JsValue::from_str("handle not found (already dropped or never created)")
-    })?;
+    let sk = table
+        .keys
+        .get(&handle)
+        .ok_or_else(|| JsValue::from_str("handle not found (already dropped or never created)"))?;
     let sig = pyde_crypto::falcon::falcon_sign(sk, &msg_bytes)
         .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
     Ok(format!("0x{}", hex::encode(sig.as_bytes())))
@@ -171,9 +172,10 @@ pub fn sign_transaction_with_handle(tx_json: &str, handle: u32) -> Result<String
     let table = key_table()
         .lock()
         .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
-    let sk = table.keys.get(&handle).ok_or_else(|| {
-        JsValue::from_str("handle not found (already dropped or never created)")
-    })?;
+    let sk = table
+        .keys
+        .get(&handle)
+        .ok_or_else(|| JsValue::from_str("handle not found (already dropped or never created)"))?;
     let sig = pyde_crypto::falcon::falcon_sign(sk, &hash)
         .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
 
