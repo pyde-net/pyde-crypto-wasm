@@ -17,7 +17,6 @@ getrandom = { version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 wasm-bindgen = "0.2"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 
@@ -40,3 +39,9 @@ wasm-opt = false
 # this test fails loudly instead of the drift manifesting as silent
 # wallet breakage.
 pyde-rust-sdk = { path = "../rust-sdk" }
+
+[package.metadata.cargo-machete]
+# getrandom_03 / getrandom_04 are pulled in to enable the `wasm_js`
+# feature on whichever getrandom version the transitive PQ-crypto deps
+# resolve to. They're feature-flag enablers, never referenced directly.
+ignored = ["getrandom", "getrandom_03", "getrandom_04"]
