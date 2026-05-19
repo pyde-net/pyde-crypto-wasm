@@ -1042,7 +1042,7 @@ mod tests {
     /// to what the validator computes from the typed
     /// `AccessEntry`).
     #[test]
-    fn tpl_304_serialize_one_access_entry_canonical_succeeds() {
+    fn serialize_one_access_entry_canonical_succeeds() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
             "reads": [
@@ -1063,7 +1063,7 @@ mod tests {
     /// zero address — silently shadowing whichever zero-address
     /// account a contract used as a sentinel.
     #[test]
-    fn tpl_304_serialize_one_access_entry_missing_address_errors() {
+    fn serialize_one_access_entry_missing_address_errors() {
         let entry = serde_json::json!({
             "reads": [],
             "writes": [],
@@ -1079,7 +1079,7 @@ mod tests {
     /// : a wrong-length `address` (here 16 bytes after
     /// hex decode) must hard-error.
     #[test]
-    fn tpl_304_serialize_one_access_entry_short_address_errors() {
+    fn serialize_one_access_entry_short_address_errors() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 16])),
             "reads": [],
@@ -1097,7 +1097,7 @@ mod tests {
     /// hash on the wallet side then disagreed with the validator's
     /// hash and the tx silently failed on-chain.
     #[test]
-    fn tpl_304_serialize_one_access_entry_short_read_key_errors() {
+    fn serialize_one_access_entry_short_read_key_errors() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
             "reads": [
@@ -1119,7 +1119,7 @@ mod tests {
     /// hard-error (pre-fix the field was silently treated as
     /// empty via `as_array().unwrap_or_default()`).
     #[test]
-    fn tpl_304_serialize_one_access_entry_writes_wrong_type_errors() {
+    fn serialize_one_access_entry_writes_wrong_type_errors() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
             "reads": [],
@@ -1135,7 +1135,7 @@ mod tests {
     /// omit one or both fields when a contract only reads or
     /// only writes.
     #[test]
-    fn tpl_304_serialize_one_access_entry_missing_reads_writes_treated_as_empty() {
+    fn serialize_one_access_entry_missing_reads_writes_treated_as_empty() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
         });
