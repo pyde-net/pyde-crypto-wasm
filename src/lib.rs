@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use wasm_bindgen::prelude::*;
 
 // ============================================================================
-// Audit 361: opaque-handle keystore
+// : opaque-handle keystore
 // ============================================================================
 //
 // `generate_keypair_handle` keeps the FALCON secret key inside this
@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 // memory snapshots, never survive in a crash dump as a recoverable
 // hex string, and never get accidentally logged.
 //
-// `FalconSecretKey` already derives `ZeroizeOnDrop` (audit 358), so
+// `FalconSecretKey` already derives `ZeroizeOnDrop` (), so
 // removing the entry from the map (via `BTreeMap::remove` →
 // `Drop::drop`) actually zeroes the secret bytes in place.
 //
@@ -28,7 +28,7 @@ use wasm_bindgen::prelude::*;
 // thread-local plumbing, and the API stays callable from any
 // future worker context without additional setup.
 //
-// TPL-607: backed by `BTreeMap<u32, FalconSecretKey>` rather than
+// : backed by `BTreeMap<u32, FalconSecretKey>` rather than
 // `HashMap`. Two reasons:
 //   1. `HashMap`'s default `RandomState` hasher pulls per-process
 //      entropy from `getrandom`, which on wasm32 means an extra
@@ -41,7 +41,7 @@ use wasm_bindgen::prelude::*;
 //      insert / get / remove, so the ordering change is
 //      observable-equivalent today, but locks in deterministic
 //      behaviour ahead of any future iter use-site.
-// The audit-358 zeroize story is unchanged: `BTreeMap::remove`
+// The  zeroize story is unchanged: `BTreeMap::remove`
 // returns the value by move, dropping it triggers `ZeroizeOnDrop`
 // identically to the previous `HashMap::remove` path.
 //
@@ -77,15 +77,13 @@ fn key_table() -> &'static Mutex<KeyTable> {
 
 /// Generate a FALCON-512 keypair.
 /// Returns JSON: { "publicKey": "0x...", "secretKey": "0x...", "address": "0x..." }
-///
-/// **Audit 361 — security warning**: this function returns the
+/// **security warning**: this function returns the
 /// secret key as a hex string into the JS heap. Once there, it is
 /// reachable from:
 ///   - browser dev-tools console (`Object.values(walletState)`)
 ///   - browser extensions with content-script access to the page
 ///   - process crash dumps (the string survives until JS GC)
 ///   - accidental logging (`JSON.stringify(walletState)`)
-///
 /// For wallet UIs that need to hold the key in-process, prefer
 /// `generateKeypairHandle` + `signMessageWithHandle` /
 /// `signTransactionWithHandle` / `dropKeypair`. Those keep the SK
@@ -109,14 +107,13 @@ pub fn generate_keypair() -> Result<String, JsValue> {
     Ok(result.to_string())
 }
 
-/// Audit 361: opaque-handle variant of `generateKeypair`. Generates
+/// : opaque-handle variant of `generateKeypair`. Generates
 /// a FALCON-512 keypair, retains the secret key inside this crate's
 /// WASM heap, and returns JSON with only the `publicKey`, `address`,
 /// and an opaque `handle: u32` to JS. The SK bytes never enter the
 /// JS heap. Use `signMessageWithHandle` / `signTransactionWithHandle`
 /// to sign with the retained key, and `dropKeypair(handle)` when
 /// done.
-///
 /// Returns JSON: `{ "publicKey": "0x...", "address": "0x...",
 ///                  "handle": 1 }`.
 #[wasm_bindgen(js_name = "generateKeypairHandle")]
@@ -128,7 +125,7 @@ pub fn generate_keypair_handle() -> Result<String, JsValue> {
     let handle = {
         let mut table = key_table()
             .lock()
-            .map_err(|_| JsValue::from_str("internal: key table mutex poisoned (audit 361)"))?;
+            .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
         let h = table.next_handle;
         table.next_handle = table.next_handle.checked_add(1).ok_or_else(|| {
             JsValue::from_str("handle space exhausted (u32::MAX keypairs generated this session)")
@@ -145,25 +142,24 @@ pub fn generate_keypair_handle() -> Result<String, JsValue> {
     Ok(result.to_string())
 }
 
-/// Audit 361: sign a message using a key retained by handle. The
+/// : sign a message using a key retained by handle. The
 /// SK bytes never leave this crate's WASM heap.
-///
 /// Returns the signature as a `0x`-prefixed hex string.
 #[wasm_bindgen(js_name = "signMessageWithHandle")]
 pub fn sign_message_with_handle(handle: u32, message_hex: &str) -> Result<String, JsValue> {
     let msg_bytes = decode_hex(message_hex)?;
     let table = key_table()
         .lock()
-        .map_err(|_| JsValue::from_str("internal: key table mutex poisoned (audit 361)"))?;
+        .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
     let sk = table.keys.get(&handle).ok_or_else(|| {
-        JsValue::from_str("audit 361: handle not found (already dropped or never created)")
+        JsValue::from_str("handle not found (already dropped or never created)")
     })?;
     let sig = pyde_crypto::falcon::falcon_sign(sk, &msg_bytes)
         .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
     Ok(format!("0x{}", hex::encode(sig.as_bytes())))
 }
 
-/// Audit 361: sign a transaction (same JSON shape as
+/// : sign a transaction (same JSON shape as
 /// `signTransaction`) using a key retained by handle. Returns the
 /// signed wire bytes as `0x`-prefixed hex.
 #[wasm_bindgen(js_name = "signTransactionWithHandle")]
@@ -174,9 +170,9 @@ pub fn sign_transaction_with_handle(tx_json: &str, handle: u32) -> Result<String
 
     let table = key_table()
         .lock()
-        .map_err(|_| JsValue::from_str("internal: key table mutex poisoned (audit 361)"))?;
+        .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
     let sk = table.keys.get(&handle).ok_or_else(|| {
-        JsValue::from_str("audit 361: handle not found (already dropped or never created)")
+        JsValue::from_str("handle not found (already dropped or never created)")
     })?;
     let sig = pyde_crypto::falcon::falcon_sign(sk, &hash)
         .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
@@ -185,15 +181,15 @@ pub fn sign_transaction_with_handle(tx_json: &str, handle: u32) -> Result<String
     Ok(format!("0x{}", hex::encode(&tx_bytes)))
 }
 
-/// Audit 361: drop a retained keypair. The `FalconSecretKey`'s
-/// `ZeroizeOnDrop` impl (audit 358) overwrites the secret bytes in
+/// : drop a retained keypair. The `FalconSecretKey`'s
+/// `ZeroizeOnDrop` impl () overwrites the secret bytes in
 /// place when removed from the table. Returns `true` if a key was
 /// actually removed, `false` if the handle was already dropped.
 #[wasm_bindgen(js_name = "dropKeypair")]
 pub fn drop_keypair(handle: u32) -> Result<bool, JsValue> {
     let mut table = key_table()
         .lock()
-        .map_err(|_| JsValue::from_str("internal: key table mutex poisoned (audit 361)"))?;
+        .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
     Ok(table.keys.remove(&handle).is_some())
 }
 
@@ -273,7 +269,7 @@ pub fn hash_transaction(tx_json: &str) -> Result<String, JsValue> {
     Ok(format!("0x{}", hex::encode(hash)))
 }
 
-/// Wire-encode a `TransactionType::RegisterPubkey` (audit 229) tx
+/// Wire-encode a `TransactionType::RegisterPubkey` () tx
 /// without signing. The address-derivation check (`from ==
 /// Poseidon2(data)`) IS the proof of pubkey ownership for this
 /// tx type, so a FALCON sig is neither needed nor accepted.
@@ -324,19 +320,19 @@ fn compute_tx_hash(v: &serde_json::Value) -> Result<[u8; 32], JsValue> {
     let data = parse_hex_bytes(v.get("data"));
     let gas_limit = v.get("gasLimit").and_then(|v| v.as_u64()).unwrap_or(21000);
     let nonce = v.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-    // Audit 362: chainId is REQUIRED. Pre-fix `unwrap_or(31337)`
+    // : chainId is REQUIRED. Pre-fix `unwrap_or(31337)`
     // silently bound a missing-chainId tx to devnet, opening the
-    // same cross-chain replay surface that audit 302/303 closed
+    // same cross-chain replay surface that /303 closed
     // on the RPC side: a wallet that omitted chainId on testnet
     // signed a tx targeted at devnet (or, after a chain_id 1
     // mainnet ships, at mainnet — where the same FALCON keypair
     // would replay onto whatever chain happened to share the
-    // default). The fix mirrors audit 302's strict resolution:
+    // default). The fix mirrors strict resolution:
     // missing → error, present → use as-is.
     let chain_id = v
         .get("chainId")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| JsValue::from_str("audit 362: chainId is required (use chainId: <u64>)"))?;
+        .ok_or_else(|| JsValue::from_str("chainId is required (use chainId: <u64>)"))?;
     let tx_type = v.get("txType").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
 
     // Same hash algorithm as Transaction::hash() in pyde-tx
@@ -389,8 +385,7 @@ fn hash_serialize_access_list(entries: &[serde_json::Value]) -> Result<Vec<u8>, 
     Ok(buf)
 }
 
-/// TPL-304: hard-error on any malformed access-list entry field.
-///
+/// : hard-error on any malformed access-list entry field.
 /// Pre-fix this was infallible: a missing `address`, bad hex, or
 /// wrong-length address silently zero-filled to `[0u8; 32]`, and
 /// any individual `reads` / `writes` key that didn't decode to
@@ -405,7 +400,6 @@ fn hash_serialize_access_list(entries: &[serde_json::Value]) -> Result<Vec<u8>, 
 /// every malformed-input path return an error so the wallet
 /// hits the failure synchronously, with a message naming the
 /// offending field.
-///
 /// The error type is `String` rather than `JsValue` so the
 /// helper is testable on native targets (constructing `JsValue`
 /// outside a wasm runtime aborts the process — see existing
@@ -485,11 +479,11 @@ fn serialize_tx(v: &serde_json::Value, signature: &[u8]) -> Result<Vec<u8>, JsVa
     let data = parse_hex_bytes(v.get("data"));
     let gas_limit = v.get("gasLimit").and_then(|v| v.as_u64()).unwrap_or(21000);
     let nonce = v.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-    // Audit 362: chainId required; see compute_tx_hash for rationale.
+    // : chainId required; see compute_tx_hash for rationale.
     let chain_id = v
         .get("chainId")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| JsValue::from_str("audit 362: chainId is required (use chainId: <u64>)"))?;
+        .ok_or_else(|| JsValue::from_str("chainId is required (use chainId: <u64>)"))?;
     let tx_type = v.get("txType").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
 
     let mut buf = Vec::new();
@@ -532,7 +526,6 @@ fn serialize_tx(v: &serde_json::Value, signature: &[u8]) -> Result<Vec<u8>, JsVa
 /// `pk_hex` is the hex-encoded wire bytes from
 /// `pyde_getThresholdPublicKey`. `payload_hex` is the bytes to
 /// encrypt — typically `to (32) || value_le (16) || calldata`.
-///
 /// Returns hex of `ThresholdCiphertext::to_wire_bytes()` ready to
 /// embed in an `EncryptedTx`.
 #[wasm_bindgen(js_name = "thresholdEncrypt")]
@@ -548,14 +541,12 @@ pub fn threshold_encrypt_wasm(pk_hex: &str, payload_hex: &str) -> Result<String,
 
 /// One-shot client-side EncryptedTx builder. Does everything a
 /// wallet needs for the MEV-protected flow in a single call:
-///
 ///   1. Threshold-encrypt `(to || value_le || calldata)` with the
 ///      committee pubkey.
 ///   2. Assemble the EncryptedTx wire frame with `signature = []`.
 ///   3. Compute `EncryptedTx::hash` (same formula the node uses).
 ///   4. FALCON-sign the hash with the sender's secret key.
 ///   5. Serialize the full wire frame.
-///
 /// `params_json` shape (all strings are `0x`-prefixed hex unless
 /// noted):
 /// ```ignore
@@ -576,7 +567,6 @@ pub fn threshold_encrypt_wasm(pk_hex: &str, payload_hex: &str) -> Result<String,
 ///   "calldata": "0x..."              // hex bytes
 /// }
 /// ```
-///
 /// Returns hex of the wire-encoded EncryptedTx, ready to submit via
 /// `pyde_sendRawEncryptedTransaction`.
 #[wasm_bindgen(js_name = "buildRawEncryptedTx")]
@@ -599,7 +589,7 @@ pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<St
         .get("gasLimit")
         .and_then(|x| x.as_u64())
         .unwrap_or(100_000);
-    // Audit 362: chainId required; see `compute_tx_hash` for the
+    // : chainId required; see `compute_tx_hash` for the
     // cross-chain replay rationale. Encrypted-tx flows are higher-
     // value than plain tx flows (each carries a value transfer
     // alongside the calldata), so a default-on-31337 here was
@@ -607,7 +597,7 @@ pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<St
     let chain_id = v
         .get("chainId")
         .and_then(|x| x.as_u64())
-        .ok_or_else(|| JsValue::from_str("audit 362: chainId is required (use chainId: <u64>)"))?;
+        .ok_or_else(|| JsValue::from_str("chainId is required (use chainId: <u64>)"))?;
     let deadline = v.get("deadline").and_then(|x| x.as_u64());
     let to = parse_addr(v.get("to"))?;
     let value = parse_u128(v.get("value"));
@@ -847,7 +837,6 @@ mod tests {
     }
 
     /// REGRESSION GUARD for the bombard 100% encrypted-tx drop.
-    ///
     /// The existing `threshold_encrypt_primitive_roundtrips` test
     /// only verifies that the WASM-produced ciphertext bytes can
     /// be DECODED by the real wire-format reader. It does NOT
@@ -857,7 +846,6 @@ mod tests {
     /// That gap is what let the WASM ship producing ciphertexts
     /// that decoded fine but failed the MAC check 100% of the
     /// time.
-    ///
     /// This test closes that gap: encrypt via WASM, decode via
     /// the real reader, generate decryption shares from the
     /// committee shares, combine them, and assert the recovered
@@ -878,7 +866,7 @@ mod tests {
         let ct = pyde_crypto::threshold::ThresholdCiphertext::from_wire_bytes(&ct_bytes)
             .expect("real decoder must accept WASM ciphertext");
 
-        // TPL-301: each decryption share is FALCON-signed; mint a
+        // : each decryption share is FALCON-signed; mint a
         // committee of fresh keypairs whose pk vector indexes match
         // the share-index assignment.
         let mut falcon_pks = Vec::with_capacity(4);
@@ -917,14 +905,14 @@ mod tests {
     // These paths are exercised end-to-end via the `pyde-ts-sdk` jest
     // suite once the wasm bundle is rebuilt.
 
-    // ========== Audit 361: opaque-handle key retention ==========
+    // ========== : opaque-handle key retention ==========
 
     /// `generateKeypairHandle` returns a JSON object that does NOT
     /// expose the secret key — only `publicKey`, `address`, and the
     /// opaque `handle`. Pre-fix the only API was `generateKeypair`
     /// which serialized the SK as hex into the JS heap.
     #[test]
-    fn audit_361_generate_keypair_handle_does_not_leak_sk() {
+    fn generate_keypair_handle_does_not_leak_sk() {
         let json = generate_keypair_handle().unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -950,7 +938,7 @@ mod tests {
     /// is the one identified by the handle, end-to-end without the
     /// SK ever leaving the WASM heap.
     #[test]
-    fn audit_361_sign_message_with_handle_verifies() {
+    fn sign_message_with_handle_verifies() {
         let json = generate_keypair_handle().unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let pk_hex = v.get("publicKey").and_then(|x| x.as_str()).unwrap();
@@ -975,7 +963,7 @@ mod tests {
     /// `dropKeypair` removes the entry; subsequent `dropKeypair`
     /// returns false for the same handle (already-dropped).
     #[test]
-    fn audit_361_drop_keypair_idempotent() {
+    fn drop_keypair_idempotent() {
         let json = generate_keypair_handle().unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let handle = v.get("handle").and_then(|x| x.as_u64()).unwrap() as u32;
@@ -991,7 +979,7 @@ mod tests {
     /// independent handle; signing with one handle does not affect
     /// the other.
     #[test]
-    fn audit_361_handles_are_independent() {
+    fn handles_are_independent() {
         let j_a = generate_keypair_handle().unwrap();
         let j_b = generate_keypair_handle().unwrap();
         let v_a: serde_json::Value = serde_json::from_str(&j_a).unwrap();
@@ -1013,14 +1001,14 @@ mod tests {
         let _ = drop_keypair(h_b);
     }
 
-    // ========== Audit 362: chainId is required ==========
+    // ========== : chainId is required ==========
 
     /// Happy-path regression: chainId provided → tx hash produced
     /// (the existing `build_raw_encrypted_tx_decodes_with_production_decoder`
     /// covers this for the encrypted path; this test pins the plain
     /// `hashTransaction` path).
     #[test]
-    fn audit_362_chain_id_required_happy_path() {
+    fn chain_id_required_happy_path() {
         let tx = serde_json::json!({
             "from":     format!("0x{}", hex::encode([0xAAu8; 32])),
             "to":       format!("0x{}", hex::encode([0xBBu8; 32])),
@@ -1045,9 +1033,9 @@ mod tests {
         assert_ne!(hash_hex, hash2, "chainId must be part of the tx digest",);
     }
 
-    // ========== TPL-304: serialize_one_access_entry hard-errors ==========
+    // ========== : serialize_one_access_entry hard-errors ==========
 
-    /// TPL-304: positive control — a well-formed access list with
+    /// : positive control — a well-formed access list with
     /// canonical 32-byte address + reads + writes serializes
     /// successfully and round-trips through the typed Rust
     /// access-list encoder (i.e., the bytes are byte-identical
@@ -1069,7 +1057,7 @@ mod tests {
         assert_eq!(buf.len(), 32 + 4 + 64 + 4 + 32);
     }
 
-    /// TPL-304: a missing `address` field must hard-error rather
+    /// : a missing `address` field must hard-error rather
     /// than silently zero-fill. Pre-fix, an absent `address`
     /// produced a serialized entry whose first 32 bytes were the
     /// zero address — silently shadowing whichever zero-address
@@ -1088,7 +1076,7 @@ mod tests {
         );
     }
 
-    /// TPL-304: a wrong-length `address` (here 16 bytes after
+    /// : a wrong-length `address` (here 16 bytes after
     /// hex decode) must hard-error.
     #[test]
     fn tpl_304_serialize_one_access_entry_short_address_errors() {
@@ -1102,7 +1090,7 @@ mod tests {
         assert!(msg.contains("address must be 32 bytes"));
     }
 
-    /// TPL-304: a malformed `reads` entry must hard-error and
+    /// : a malformed `reads` entry must hard-error and
     /// name the offending index. Pre-fix, `filter_map` silently
     /// dropped the bad key, so a frontend sending 5 keys with
     /// the third one wrong got back a 4-key access list — the
@@ -1127,7 +1115,7 @@ mod tests {
         );
     }
 
-    /// TPL-304: `writes` field present but not an array must
+    /// : `writes` field present but not an array must
     /// hard-error (pre-fix the field was silently treated as
     /// empty via `as_array().unwrap_or_default()`).
     #[test]
@@ -1142,7 +1130,7 @@ mod tests {
         assert!(msg.contains("writes") && msg.contains("array"));
     }
 
-    /// TPL-304: missing `reads` / `writes` is treated as empty
+    /// : missing `reads` / `writes` is treated as empty
     /// (idiomatic JSON), not an error. Frontends may legitimately
     /// omit one or both fields when a contract only reads or
     /// only writes.
