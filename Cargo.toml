@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 # Only pyde-crypto — pure Rust, no C/system deps.
 # pyde-account and pyde-tx excluded (they pull in rocksdb/blake2b-rs via pyde-state).
 # Address derivation and tx hash reimplemented inline using poseidon2_hash.
-pyde-crypto = { path = "../engine/crates/crypto" }
+pyde-crypto = { path = "../pyde-crypto" }
 getrandom = { version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
