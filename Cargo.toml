@@ -38,10 +38,43 @@ wasm-opt = false
 # rust-sdk inlined decoder. If the two inlined copies ever drift,
 # this test fails loudly instead of the drift manifesting as silent
 # wallet breakage.
-pyde-rust-sdk = { path = "../rust-sdk" }
+pyde-rust-sdk = { path = "../pyde-rust-sdk" }
 
 [package.metadata.cargo-machete]
 # getrandom_03 / getrandom_04 are pulled in to enable the `wasm_js`
 # feature on whichever getrandom version the transitive PQ-crypto deps
 # resolve to. They're feature-flag enablers, never referenced directly.
 ignored = ["getrandom", "getrandom_03", "getrandom_04"]
+
+# ── Lints ────────────────────────────────────────────────────────
+#
+# Mirrors the engine workspace's lint discipline, adjusted for a
+# wasm-bindgen crate:
+#   - `unsafe_code` is `warn` not `deny` because `#[wasm_bindgen]`
+#     macro expansion generates unsafe blocks (extern "C" bindings,
+#     pointer derefs). CI flags NEW user-written unsafe but doesn't
+#     break on the macro output that's expected here.
+#   - `unwrap_used` stays `deny` — this is security-sensitive crypto
+#     code; any silent panic is a defect.
+#   - `print_stdout` / `print_stderr` / `dbg_macro` deny because this
+#     is a library shipped to browsers; stray println leaks to the
+#     consumer's console.
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# wasm-bindgen output occasionally trips this on its generated
+# enums; we'd rather not paper over our own enums with allows.
+large_enum_variant = "allow"
+
+[lints.rust]
+unsafe_code = "warn"
+unused_must_use = "deny"
