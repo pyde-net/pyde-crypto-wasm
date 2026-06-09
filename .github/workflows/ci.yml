@@ -16,11 +16,28 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# ─── Polyrepo sibling-checkout pattern ──────────────────────────────────
+#
+# Cargo.toml uses path-deps to sibling repos:
+#   pyde-crypto   = { path = "../pyde-crypto" }       (lib dep)
+#   pyde-rust-sdk = { path = "../pyde-rust-sdk" }     (dev dep — parity test)
+#
+# Each job below checks pyde-crypto-wasm into a subdirectory named
+# `pyde-crypto-wasm`, then checks out the sibling repos alongside it so
+# the relative `../` paths resolve the same way they do on a contributor's
+# machine. All cargo commands then run inside `pyde-crypto-wasm/`.
+#
+# pyde-rust-sdk currently has pre-existing compile errors (`pyde_tx::types::*`
+# references that don't resolve) — that's why we run `cargo clippy --lib`
+# instead of `--all-targets`. Cargo metadata still walks the dev-dep, so
+# the dir must EXIST, but its content doesn't need to compile.
+
 jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
+      # fmt doesn't touch sibling repos — single checkout is fine.
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -32,29 +49,57 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: pyde-crypto-wasm
+      - uses: actions/checkout@v4
+        with:
+          repository: pyde-net/pyde-crypto
+          path: pyde-crypto
+      - uses: actions/checkout@v4
+        with:
+          repository: pyde-net/pyde-rust-sdk
+          path: pyde-rust-sdk
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # Lib-only because the parity test in `src/lib.rs` dev-depends
-      # on `pyde-rust-sdk`, which currently has pre-existing compile
-      # errors unrelated to this crate. Re-enable `--all-targets`
-      # once `pyde-rust-sdk` builds clean.
-      - run: cargo clippy --lib -- -D warnings
+        with:
+          workspaces: pyde-crypto-wasm
+      # Lib-only — the parity test pulls in pyde-rust-sdk, which has
+      # pre-existing compile errors. Re-enable --all-targets once
+      # pyde-rust-sdk builds clean.
+      - working-directory: pyde-crypto-wasm
+        run: cargo clippy --lib -- -D warnings
 
   build-wasm:
     name: wasm-pack build (web + nodejs targets)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: pyde-crypto-wasm
+      - uses: actions/checkout@v4
+        with:
+          repository: pyde-net/pyde-crypto
+          path: pyde-crypto
+      - uses: actions/checkout@v4
+        with:
+          repository: pyde-net/pyde-rust-sdk
+          path: pyde-rust-sdk
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pyde-crypto-wasm
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      # The actual ship-path: a CI failure here means real users hit
-      # a broken `wasm-pack build`, not a hypothetical lint nit.
-      - run: wasm-pack build --target web --release
-      - run: wasm-pack build --target nodejs --release
+      # The actual ship-path: a failure here means real users hit a
+      # broken `wasm-pack build`, not a hypothetical lint nit.
+      - name: wasm-pack build (web)
+        working-directory: pyde-crypto-wasm
+        run: wasm-pack build --target web --release
+      - name: wasm-pack build (nodejs)
+        working-directory: pyde-crypto-wasm
+        run: wasm-pack build --target nodejs --release
