@@ -42,7 +42,37 @@ or as the cryptography layer underneath the
 
 ## Install
 
-Once published to npm:
+> **🚧 Not yet published to npm.** `pyde-crypto-wasm` is still pre-release;
+> the npm package will be published once the host-fn ABI freezes for v1
+> mainnet. For now, build from source (below) and link locally — that's
+> the supported path. The npm-install snippet further down is what the
+> install will look like once we publish; don't copy-paste it yet.
+
+### Build from source (works today)
+
+```bash
+# Install wasm-pack if you don't have it:
+curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+# From this repo's root:
+wasm-pack build --target web --release       # for browser use
+# OR
+wasm-pack build --target nodejs --release    # for Node.js use
+
+# Package output lands under ./pkg
+# Link into your app:
+cd pkg && npm link
+cd /path/to/your-app && npm link pyde-crypto-wasm
+```
+
+Requires Rust stable + the `wasm32-unknown-unknown` target installed
+(`rustup target add wasm32-unknown-unknown`). See
+[Building from source](#building-from-source) further down for the
+full target matrix and bundler-specific notes.
+
+### Once published (placeholder — DO NOT use yet)
+
+When the npm release goes live, install will be:
 
 ```bash
 npm install pyde-crypto-wasm
@@ -52,10 +82,15 @@ pnpm add pyde-crypto-wasm
 yarn add pyde-crypto-wasm
 ```
 
-During development (when pyde-net repos sit alongside each other),
-build locally and link with `npm link` or pack with `npm pack`.
+This README + the [pyde-net status page](https://pyde.network/status) will
+be updated the moment the package is up on the registry.
 
 ## Quickstart — browser
+
+> The `from 'pyde-crypto-wasm'` import path below works once you've
+> built locally and linked (see [Install](#install)), or once we
+> publish to npm. During pre-release, replace with a relative path to
+> your local `pkg/` directory: `import init, { ... } from './pkg/pyde_crypto_wasm.js'`.
 
 ```html
 <script type="module">
@@ -79,6 +114,11 @@ build locally and link with `npm link` or pack with `npm pack`.
 ```
 
 ## Quickstart — Node
+
+> Same import-path note as the browser quickstart: the `require('pyde-crypto-wasm')`
+> line works once you've built locally + linked (`npm link`) or once we
+> publish. Pre-release alternative: `require('./pkg/pyde_crypto_wasm')` against
+> a local `wasm-pack build --target nodejs` output.
 
 ```js
 const {
