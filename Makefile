@@ -28,7 +28,7 @@ fmt-fix: ## cargo fmt — apply formatting in place
 clippy: ## cargo clippy --lib -- -D warnings (CI gate; --lib only — see ci.yml note on pyde-rust-sdk dev-dep)
 	cargo clippy --lib -- -D warnings
 
-wasm: wasm-web wasm-node ## Both wasm-pack targets (CI gate)
+wasm: wasm-node wasm-web ## Both wasm-pack targets (CI gate). wasm-web runs LAST so the committed pkg/ ends up as ESM — the form npm consumers (e.g. pyde-ts-sdk) need.
 
 wasm-web: ## wasm-pack build --target web --release
 	wasm-pack build --target web --release
