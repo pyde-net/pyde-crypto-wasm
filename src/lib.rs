@@ -107,6 +107,41 @@ pub fn generate_keypair() -> Result<String, JsValue> {
     Ok(result.to_string())
 }
 
+/// Deterministically derive a FALCON-512 keypair from a 32-byte seed.
+/// Returns the same JSON shape as `generateKeypair`. Same security
+/// warning applies — the SK is in the JS heap; encrypt + discard ASAP.
+///
+/// Same FALCON deterministic-keygen path the engine uses for the
+/// devnet prefunded accounts (`devnet_secret(i) =
+/// Blake3("pyde-devnet-v1/" || i.to_le_bytes())`), so SDK consumers
+/// can re-derive the prefunded accounts locally for integration tests
+/// without round-tripping through the `otigen` keystore.
+///
+/// `seed_hex` is a `0x`-prefixed (or bare) 64-char hex string.
+#[wasm_bindgen(js_name = "keypairFromSeed")]
+pub fn keypair_from_seed(seed_hex: &str) -> Result<String, JsValue> {
+    let seed_bytes = hex::decode(seed_hex.trim_start_matches("0x"))
+        .map_err(|e| JsValue::from_str(&format!("seed hex decode failed: {}", e)))?;
+    if seed_bytes.len() != 32 {
+        return Err(JsValue::from_str(&format!(
+            "seed must be 32 bytes (64 hex chars), got {}",
+            seed_bytes.len(),
+        )));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_bytes);
+
+    let (pk, sk) = pyde_crypto::falcon::falcon_keygen_deterministic(&seed)
+        .map_err(|e| JsValue::from_str(&format!("deterministic keygen failed: {}", e)))?;
+    let address = poseidon2_hash(pk.as_bytes()).to_bytes();
+    let result = serde_json::json!({
+        "publicKey": format!("0x{}", hex::encode(pk.as_bytes())),
+        "secretKey": format!("0x{}", hex::encode(sk.as_bytes())),
+        "address": format!("0x{}", hex::encode(address)),
+    });
+    Ok(result.to_string())
+}
+
 /// : opaque-handle variant of `generateKeypair`. Generates
 /// a FALCON-512 keypair, retains the secret key inside this crate's
 /// WASM heap, and returns JSON with only the `publicKey`, `address`,
@@ -358,33 +393,36 @@ fn compute_tx_hash(v: &serde_json::Value) -> Result<[u8; 32], JsValue> {
     Ok(poseidon2_hash(&buf).to_bytes())
 }
 
+/// Match the engine's `hash_access_list`: borsh-encode the whole
+/// `&[AccessEntry]` slice (4-byte u32 LE count + each entry's borsh
+/// layout), then `Poseidon2(encoded)`. An empty list hashes
+/// `Poseidon2([0, 0, 0, 0])`, NOT `Poseidon2([])`.
 fn hash_access_list(v: &serde_json::Value) -> Result<[u8; 32], JsValue> {
-    let entries = match v.get("accessList").and_then(|a| a.as_array()) {
-        Some(arr) if !arr.is_empty() => arr,
-        _ => return Ok(poseidon2_hash(&[]).to_bytes()), // empty = hash of empty bytes
-    };
-    // Must match Rust's hash_access_list format: NO count prefix, just entries
-    let serialized = hash_serialize_access_list(entries).map_err(|e| JsValue::from_str(&e))?;
-    Ok(poseidon2_hash(&serialized).to_bytes())
+    let mut buf = Vec::new();
+    let entries = v.get("accessList").and_then(|a| a.as_array());
+    match entries {
+        Some(arr) if !arr.is_empty() => {
+            serialize_access_list_entries(arr, &mut buf)
+                .map_err(|e| JsValue::from_str(&e))?;
+        }
+        _ => {
+            buf.extend_from_slice(&0u32.to_le_bytes());
+        }
+    }
+    Ok(poseidon2_hash(&buf).to_bytes())
 }
 
-/// Serialize for wire encoding (WITH count prefix — matches Rust serialize_access_list)
-fn serialize_access_list_entries(entries: &[serde_json::Value]) -> Result<Vec<u8>, String> {
-    let mut buf = Vec::new();
+/// Borsh-encode a `Vec<AccessEntry>` directly into `buf` — 4-byte u32
+/// LE count followed by each entry's borsh layout.
+fn serialize_access_list_entries(
+    entries: &[serde_json::Value],
+    buf: &mut Vec<u8>,
+) -> Result<(), String> {
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for entry in entries {
-        serialize_one_access_entry(entry, &mut buf)?;
+        serialize_one_access_entry(entry, buf)?;
     }
-    Ok(buf)
-}
-
-/// Serialize for HASHING (NO count prefix — matches Rust hash_access_list)
-fn hash_serialize_access_list(entries: &[serde_json::Value]) -> Result<Vec<u8>, String> {
-    let mut buf = Vec::new();
-    for entry in entries {
-        serialize_one_access_entry(entry, &mut buf)?;
-    }
-    Ok(buf)
+    Ok(())
 }
 
 /// : hard-error on any malformed access-list entry field.
@@ -474,6 +512,24 @@ fn serialize_one_access_entry(entry: &serde_json::Value, buf: &mut Vec<u8>) -> R
 // Internal: tx serialization (mirrors Transaction::to_bytes)
 // ============================================================================
 
+/// Serialize a signed transaction into the canonical
+/// borsh-encoded `pyde_engine_types::Tx` wire form. Field order MUST
+/// match `Tx`'s declaration order — borsh serialises in declaration
+/// order; reordering is wire-breaking.
+///
+/// Field-by-field:
+///   from         : Address                = [u8; 32]
+///   to           : Address                = [u8; 32]
+///   value        : u128                   = 16 LE bytes
+///   data         : Vec<u8>                = 4-byte u32 LE len + bytes
+///   gas_limit    : Gas (u64)              = 8 LE bytes
+///   nonce        : u64                    = 8 LE bytes
+///   signature    : FalconSignature(Vec)   = 4-byte u32 LE len + sig bytes
+///   fee_payer    : FeePayer (#[repr(u8)]) = 1-byte discriminant (+ Address for Paymaster)
+///   access_list  : Vec<AccessEntry>       = 4-byte u32 LE count + entries
+///   deadline     : Option<u64>            = 1-byte tag (0 / 1) + 8 LE bytes if Some
+///   chain_id     : u64                    = 8 LE bytes
+///   tx_type      : TxType (#[repr(u8)])   = 1-byte discriminant
 fn serialize_tx(v: &serde_json::Value, signature: &[u8]) -> Result<Vec<u8>, JsValue> {
     let from = parse_addr(v.get("from"))?;
     let to = parse_addr(v.get("to"))?;
@@ -489,34 +545,35 @@ fn serialize_tx(v: &serde_json::Value, signature: &[u8]) -> Result<Vec<u8>, JsVa
     let tx_type = v.get("txType").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
 
     let mut buf = Vec::new();
-    buf.extend_from_slice(&from); // 32
-    buf.extend_from_slice(&to); // 32
-    buf.extend_from_slice(&value.to_le_bytes()); // 16
-    buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // 4
-    buf.extend_from_slice(&data); // var
-    buf.extend_from_slice(&gas_limit.to_le_bytes()); // 8
-    buf.extend_from_slice(&nonce.to_le_bytes()); // 8
-    buf.extend_from_slice(&(signature.len() as u16).to_le_bytes()); // 2
-    buf.extend_from_slice(signature); // ~666
-    buf.push(1); // fee_payer bytes len
-    buf.push(0); // FeePayer::Sender tag
-                 // access_list serialization
+    buf.extend_from_slice(&from);
+    buf.extend_from_slice(&to);
+    buf.extend_from_slice(&value.to_le_bytes());
+    // data: Vec<u8>
+    buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&data);
+    buf.extend_from_slice(&gas_limit.to_le_bytes());
+    buf.extend_from_slice(&nonce.to_le_bytes());
+    // signature: FalconSignature(Vec<u8>) → 4-byte LE len + bytes
+    buf.extend_from_slice(&(signature.len() as u32).to_le_bytes());
+    buf.extend_from_slice(signature);
+    // fee_payer: FeePayer — Sender is `0x00`, single discriminant byte.
+    buf.push(0);
+    // access_list: Vec<AccessEntry> — empty for v1 plain txs.
     let al_entries = v.get("accessList").and_then(|a| a.as_array());
-    let al_bytes = match al_entries {
+    match al_entries {
         Some(entries) if !entries.is_empty() => {
-            serialize_access_list_entries(entries).map_err(|e| JsValue::from_str(&e))?
+            serialize_access_list_entries(entries, &mut buf)
+                .map_err(|e| JsValue::from_str(&e))?;
         }
         _ => {
-            let mut b = Vec::new();
-            b.extend_from_slice(&0u32.to_le_bytes());
-            b
+            // Vec<AccessEntry>::default() → 4-byte u32 LE count = 0.
+            buf.extend_from_slice(&0u32.to_le_bytes());
         }
-    };
-    buf.extend_from_slice(&(al_bytes.len() as u32).to_le_bytes()); // byte len prefix
-    buf.extend_from_slice(&al_bytes);
-    buf.push(0); // no deadline
-    buf.extend_from_slice(&chain_id.to_le_bytes()); // 8
-    buf.push(tx_type); // 1
+    }
+    // deadline: Option<u64>::None = single 0x00 byte.
+    buf.push(0);
+    buf.extend_from_slice(&chain_id.to_le_bytes());
+    buf.push(tx_type);
     Ok(buf)
 }
 
