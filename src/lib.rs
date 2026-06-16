@@ -402,8 +402,7 @@ fn hash_access_list(v: &serde_json::Value) -> Result<[u8; 32], JsValue> {
     let entries = v.get("accessList").and_then(|a| a.as_array());
     match entries {
         Some(arr) if !arr.is_empty() => {
-            serialize_access_list_entries(arr, &mut buf)
-                .map_err(|e| JsValue::from_str(&e))?;
+            serialize_access_list_entries(arr, &mut buf).map_err(|e| JsValue::from_str(&e))?;
         }
         _ => {
             buf.extend_from_slice(&0u32.to_le_bytes());
@@ -562,8 +561,7 @@ fn serialize_tx(v: &serde_json::Value, signature: &[u8]) -> Result<Vec<u8>, JsVa
     let al_entries = v.get("accessList").and_then(|a| a.as_array());
     match al_entries {
         Some(entries) if !entries.is_empty() => {
-            serialize_access_list_entries(entries, &mut buf)
-                .map_err(|e| JsValue::from_str(&e))?;
+            serialize_access_list_entries(entries, &mut buf).map_err(|e| JsValue::from_str(&e))?;
         }
         _ => {
             // Vec<AccessEntry>::default() → 4-byte u32 LE count = 0.
@@ -633,7 +631,6 @@ pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<St
     let v: serde_json::Value = serde_json::from_str(params_json)
         .map_err(|e| JsValue::from_str(&format!("bad JSON: {}", e)))?;
 
-    // Parse fields.
     let tpk_bytes = decode_hex(
         v.get("thresholdPk")
             .and_then(|x| x.as_str())
@@ -642,89 +639,89 @@ pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<St
     let tpk = pyde_crypto::threshold::ThresholdPublicKey::from_bytes(&tpk_bytes)
         .ok_or_else(|| JsValue::from_str("invalid threshold public key"))?;
 
-    let sender = parse_addr(v.get("sender"))?;
-    let nonce = v.get("nonce").and_then(|x| x.as_u64()).unwrap_or(0);
-    let gas_limit = v
-        .get("gasLimit")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(100_000);
-    // : chainId required; see `compute_tx_hash` for the
-    // cross-chain replay rationale. Encrypted-tx flows are higher-
-    // value than plain tx flows (each carries a value transfer
-    // alongside the calldata), so a default-on-31337 here was
-    // strictly worse than the same gap on the plain-tx path.
-    let chain_id = v
-        .get("chainId")
-        .and_then(|x| x.as_u64())
-        .ok_or_else(|| JsValue::from_str("chainId is required (use chainId: <u64>)"))?;
-    let deadline = v.get("deadline").and_then(|x| x.as_u64());
-    let to = parse_addr(v.get("to"))?;
-    let value = parse_u128(v.get("value"));
-    let calldata = parse_hex_bytes(v.get("data").or_else(|| v.get("calldata")));
+    // Build the inner Tx JSON shape that compute_tx_hash + serialize_tx
+    // expect (field renames: sender→from, calldata→data; default txType
+    // to 0 = Standard).
+    let inner_tx_v = build_inner_tx_value(&v);
 
-    // Encrypt (to || value_le || calldata) — same layout as Rust's
-    // encrypt_transaction.
-    let mut payload = Vec::with_capacity(48 + calldata.len());
-    payload.extend_from_slice(&to);
-    payload.extend_from_slice(&value.to_le_bytes());
-    payload.extend_from_slice(&calldata);
-    let ct = pyde_crypto::threshold::threshold_encrypt(&tpk, &payload)
-        .map_err(|e| JsValue::from_str(&format!("threshold encryption failed: {}", e)))?;
-    let ct_wire_bytes = ct.to_wire_bytes();
-
-    // Access list — empty by default.
-    let access_entries = v
-        .get("accessList")
-        .and_then(|a| a.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    // Compute EncryptedTx::hash — MUST match
-    // `pyde_rust_sdk::encrypted_wire::EncryptedTx::hash`:
-    //   poseidon2(sender || nonce_le || gas_le || chain_le || ct_hash)
-    // where ct_hash = poseidon2(ciphertext::to_bytes()).
-    let ct_for_hash = ct.to_bytes(); // no length prefixes — matches Rust
-    let ct_hash = poseidon2_hash(&ct_for_hash);
-    let mut hash_buf = Vec::with_capacity(32 + 8 + 8 + 8 + 32);
-    hash_buf.extend_from_slice(&sender);
-    hash_buf.extend_from_slice(&nonce.to_le_bytes());
-    hash_buf.extend_from_slice(&gas_limit.to_le_bytes());
-    hash_buf.extend_from_slice(&chain_id.to_le_bytes());
-    hash_buf.extend_from_slice(&ct_hash.to_bytes());
-    let enc_tx_hash = poseidon2_hash(&hash_buf).to_bytes();
-
-    // FALCON-sign the hash.
+    // FALCON-sign the inner Tx hash with the sender's SK.
     let sk_bytes = decode_hex(sk_hex)?;
     let sk = pyde_crypto::falcon::FalconSecretKey::from_bytes(&sk_bytes)
         .ok_or_else(|| JsValue::from_str("invalid secret key"))?;
-    let sig = pyde_crypto::falcon::falcon_sign(&sk, &enc_tx_hash)
-        .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
-    let signature = sig.as_bytes().to_vec();
+    let signature = sign_inner_tx(&inner_tx_v, &sk)?;
 
-    // Serialize wire bytes. MUST match
-    // `pyde_rust_sdk::encrypted_wire::EncryptedTx::to_bytes`.
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&sender);
-    buf.extend_from_slice(&nonce.to_le_bytes());
-    buf.extend_from_slice(&gas_limit.to_le_bytes());
-    buf.extend_from_slice(&chain_id.to_le_bytes());
-    buf.push(deadline.is_some() as u8);
-    if let Some(d) = deadline {
-        buf.extend_from_slice(&d.to_le_bytes());
+    // borsh-serialize the signed inner Tx and threshold-encrypt it.
+    let plaintext = serialize_tx(&inner_tx_v, &signature)?;
+    let envelope_bytes = encrypt_and_wrap_envelope(&tpk, &plaintext)?;
+    Ok(format!("0x{}", hex::encode(&envelope_bytes)))
+}
+
+/// Project `EncryptedTxParams` JSON onto the inner-Tx shape
+/// `compute_tx_hash` + `serialize_tx` consume. Renames `sender→from`
+/// and `calldata→data`; defaults `txType` to `0` (Standard) since
+/// encrypted submission is currently only used for transfers and
+/// generic contract calls.
+fn build_inner_tx_value(v: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(x) = v.get("sender") {
+        out.insert("from".to_string(), x.clone());
     }
-    // Access list (u32 count + entries).
-    buf.extend_from_slice(&(access_entries.len() as u32).to_le_bytes());
-    for entry in &access_entries {
-        serialize_encrypted_tx_access_entry(entry, &mut buf)?;
+    for k in [
+        "to",
+        "value",
+        "gasLimit",
+        "nonce",
+        "chainId",
+        "deadline",
+        "accessList",
+    ] {
+        if let Some(x) = v.get(k) {
+            out.insert(k.to_string(), x.clone());
+        }
     }
-    // Signature (u32 len + bytes).
-    buf.extend_from_slice(&(signature.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&signature);
-    // Ciphertext (u32 len + wire bytes).
+    // calldata → data; explicit txType wins over the Standard default.
+    let data = v
+        .get("data")
+        .or_else(|| v.get("calldata"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::String("0x".to_string()));
+    out.insert("data".to_string(), data);
+    let tx_type = v
+        .get("txType")
+        .cloned()
+        .unwrap_or(serde_json::Value::Number(serde_json::Number::from(0)));
+    out.insert("txType".to_string(), tx_type);
+    serde_json::Value::Object(out)
+}
+
+fn sign_inner_tx(
+    inner_tx_v: &serde_json::Value,
+    sk: &pyde_crypto::falcon::FalconSecretKey,
+) -> Result<Vec<u8>, JsValue> {
+    let hash = compute_tx_hash(inner_tx_v)?;
+    let sig = pyde_crypto::falcon::falcon_sign(sk, &hash)
+        .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
+    Ok(sig.as_bytes().to_vec())
+}
+
+/// Threshold-encrypt the borsh-serialized inner Tx and wrap into the
+/// engine's `EncryptedTxEnvelope` wire shape (catalog: `version: u8 ||
+/// borsh(ciphertext: Vec<u8>)`). Returns the borsh-serialized envelope
+/// bytes ready to hex-encode.
+fn encrypt_and_wrap_envelope(
+    tpk: &pyde_crypto::threshold::ThresholdPublicKey,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let ct = pyde_crypto::threshold::threshold_encrypt(tpk, plaintext)
+        .map_err(|e| JsValue::from_str(&format!("threshold encryption failed: {}", e)))?;
+    let ct_wire_bytes = ct.to_wire_bytes();
+    // EncryptedTxEnvelope { version: u8, ciphertext: Vec<u8> } — borsh
+    // serialises Vec<T> as `u32 LE length || items`.
+    let mut buf = Vec::with_capacity(1 + 4 + ct_wire_bytes.len());
+    buf.push(1u8); // EncryptedTxEnvelope::VERSION
     buf.extend_from_slice(&(ct_wire_bytes.len() as u32).to_le_bytes());
     buf.extend_from_slice(&ct_wire_bytes);
-
-    Ok(format!("0x{}", hex::encode(&buf)))
+    Ok(buf)
 }
 
 /// Handle-based variant of `buildRawEncryptedTx`. Same `params_json`
@@ -742,7 +739,6 @@ pub fn build_raw_encrypted_tx_with_handle_wasm(
     let v: serde_json::Value = serde_json::from_str(params_json)
         .map_err(|e| JsValue::from_str(&format!("bad JSON: {}", e)))?;
 
-    // Parse fields — identical to build_raw_encrypted_tx_wasm.
     let tpk_bytes = decode_hex(
         v.get("thresholdPk")
             .and_then(|x| x.as_str())
@@ -751,128 +747,25 @@ pub fn build_raw_encrypted_tx_with_handle_wasm(
     let tpk = pyde_crypto::threshold::ThresholdPublicKey::from_bytes(&tpk_bytes)
         .ok_or_else(|| JsValue::from_str("invalid threshold public key"))?;
 
-    let sender = parse_addr(v.get("sender"))?;
-    let nonce = v.get("nonce").and_then(|x| x.as_u64()).unwrap_or(0);
-    let gas_limit = v
-        .get("gasLimit")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(100_000);
-    let chain_id = v
-        .get("chainId")
-        .and_then(|x| x.as_u64())
-        .ok_or_else(|| JsValue::from_str("chainId is required (use chainId: <u64>)"))?;
-    let deadline = v.get("deadline").and_then(|x| x.as_u64());
-    let to = parse_addr(v.get("to"))?;
-    let value = parse_u128(v.get("value"));
-    let calldata = parse_hex_bytes(v.get("data").or_else(|| v.get("calldata")));
+    let inner_tx_v = build_inner_tx_value(&v);
 
-    // Encrypt (to || value_le || calldata).
-    let mut payload = Vec::with_capacity(48 + calldata.len());
-    payload.extend_from_slice(&to);
-    payload.extend_from_slice(&value.to_le_bytes());
-    payload.extend_from_slice(&calldata);
-    let ct = pyde_crypto::threshold::threshold_encrypt(&tpk, &payload)
-        .map_err(|e| JsValue::from_str(&format!("threshold encryption failed: {}", e)))?;
-    let ct_wire_bytes = ct.to_wire_bytes();
-
-    // Access list — empty by default.
-    let access_entries = v
-        .get("accessList")
-        .and_then(|a| a.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    // Compute EncryptedTx::hash.
-    let ct_for_hash = ct.to_bytes();
-    let ct_hash = poseidon2_hash(&ct_for_hash);
-    let mut hash_buf = Vec::with_capacity(32 + 8 + 8 + 8 + 32);
-    hash_buf.extend_from_slice(&sender);
-    hash_buf.extend_from_slice(&nonce.to_le_bytes());
-    hash_buf.extend_from_slice(&gas_limit.to_le_bytes());
-    hash_buf.extend_from_slice(&chain_id.to_le_bytes());
-    hash_buf.extend_from_slice(&ct_hash.to_bytes());
-    let enc_tx_hash = poseidon2_hash(&hash_buf).to_bytes();
-
-    // ── Sole difference from buildRawEncryptedTx: sign via the handle
-    // ── table instead of decoding sk_hex.
-    let table = key_table()
-        .lock()
-        .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
-    let sk = table
-        .keys
-        .get(&handle)
-        .ok_or_else(|| JsValue::from_str("handle not found (already dropped or never created)"))?;
-    let sig = pyde_crypto::falcon::falcon_sign(sk, &enc_tx_hash)
-        .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
-    let signature = sig.as_bytes().to_vec();
-    drop(table); // release the mutex before the heavy serialization below.
-
-    // Serialize wire bytes — identical layout to buildRawEncryptedTx.
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&sender);
-    buf.extend_from_slice(&nonce.to_le_bytes());
-    buf.extend_from_slice(&gas_limit.to_le_bytes());
-    buf.extend_from_slice(&chain_id.to_le_bytes());
-    buf.push(deadline.is_some() as u8);
-    if let Some(d) = deadline {
-        buf.extend_from_slice(&d.to_le_bytes());
-    }
-    buf.extend_from_slice(&(access_entries.len() as u32).to_le_bytes());
-    for entry in &access_entries {
-        serialize_encrypted_tx_access_entry(entry, &mut buf)?;
-    }
-    buf.extend_from_slice(&(signature.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&signature);
-    buf.extend_from_slice(&(ct_wire_bytes.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&ct_wire_bytes);
-
-    Ok(format!("0x{}", hex::encode(&buf)))
-}
-
-/// Serialize one access-list entry for an EncryptedTx. Layout mirrors
-/// `pyde_rust_sdk::encrypted_wire::EncryptedTx::to_bytes` which uses
-/// u16 read/write counts (distinct from the Transaction wire format
-/// which uses u32 here).
-fn serialize_encrypted_tx_access_entry(
-    entry: &serde_json::Value,
-    buf: &mut Vec<u8>,
-) -> Result<(), JsValue> {
-    let addr_bytes = parse_addr(entry.get("address"))?;
-    buf.extend_from_slice(&addr_bytes);
-
-    let parse_keys = |field: &str| -> Result<Vec<[u8; 32]>, JsValue> {
-        let arr = entry
-            .get(field)
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let mut out = Vec::with_capacity(arr.len());
-        for k in arr {
-            let s = k
-                .as_str()
-                .ok_or_else(|| JsValue::from_str("access list key must be string"))?;
-            let b = decode_hex(s)?;
-            if b.len() != 32 {
-                return Err(JsValue::from_str("access list key must be 32 bytes"));
-            }
-            let mut k32 = [0u8; 32];
-            k32.copy_from_slice(&b);
-            out.push(k32);
-        }
-        Ok(out)
+    // Compute the hash + sign via the handle table.
+    let hash = compute_tx_hash(&inner_tx_v)?;
+    let signature = {
+        let table = key_table()
+            .lock()
+            .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
+        let sk = table.keys.get(&handle).ok_or_else(|| {
+            JsValue::from_str("handle not found (already dropped or never created)")
+        })?;
+        let sig = pyde_crypto::falcon::falcon_sign(sk, &hash)
+            .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
+        sig.as_bytes().to_vec()
     };
 
-    let reads = parse_keys("reads")?;
-    buf.extend_from_slice(&(reads.len() as u16).to_le_bytes());
-    for r in &reads {
-        buf.extend_from_slice(r);
-    }
-    let writes = parse_keys("writes")?;
-    buf.extend_from_slice(&(writes.len() as u16).to_le_bytes());
-    for w in &writes {
-        buf.extend_from_slice(w);
-    }
-    Ok(())
+    let plaintext = serialize_tx(&inner_tx_v, &signature)?;
+    let envelope_bytes = encrypt_and_wrap_envelope(&tpk, &plaintext)?;
+    Ok(format!("0x{}", hex::encode(&envelope_bytes)))
 }
 
 // ============================================================================
@@ -931,7 +824,12 @@ mod tests {
     use pyde_crypto::threshold::threshold_keygen;
 
     #[test]
-    fn build_raw_encrypted_tx_decodes_with_production_decoder() {
+    fn build_raw_encrypted_tx_emits_envelope_shape() {
+        // Verify the output matches the engine's `EncryptedTxEnvelope`
+        // wire shape: `[version: u8][ciphertext_len: u32 LE][ciphertext: bytes]`.
+        // The engine's admit-check enforces this shape; full
+        // round-trip (decrypt → inner Tx → FALCON verify) is owned by
+        // the SDK's live integration tests.
         let (tpk, _shares) = threshold_keygen(4, 3).unwrap();
         let (pk, sk) = falcon_keygen().unwrap();
         let sender = poseidon2_hash(pk.as_bytes()).to_bytes();
@@ -953,29 +851,30 @@ mod tests {
         let wire_hex = build_raw_encrypted_tx_wasm(&params.to_string(), &sk_hex).unwrap();
         let wire_bytes = hex::decode(wire_hex.trim_start_matches("0x")).unwrap();
 
-        // Decode with the canonical rust-sdk decoder. If this
-        // succeeds and every field matches, the WASM wire format
-        // is byte-compatible with the SDK / node-side reader.
-        let decoded = pyde_rust_sdk::encrypted_wire::EncryptedTx::from_bytes(&wire_bytes)
-            .expect("canonical decoder must accept WASM-built bytes");
+        // Version byte = EncryptedTxEnvelope::VERSION (= 1 in v1).
+        assert_eq!(wire_bytes[0], 1, "envelope version byte must be 1");
+        // u32 LE length prefix matches the actual ciphertext length.
+        let ct_len = u32::from_le_bytes(wire_bytes[1..5].try_into().unwrap()) as usize;
+        assert_eq!(
+            wire_bytes.len(),
+            1 + 4 + ct_len,
+            "envelope total = version (1) + len prefix (4) + ciphertext ({ct_len})"
+        );
+        // Floor: a real Kyber-768 ciphertext is at least
+        // MIN_CIPHERTEXT_LEN bytes per the engine's admit check.
+        // 1184 (Kyber-768 ct) + 12 (Poly1305 nonce) + 16 (tag) + 1 = 1213.
+        // The pyde-crypto wire format adds two u32 length prefixes
+        // (4 + 4 bytes) and a 32-byte MAC, totalling ≥ 1255.
+        assert!(
+            ct_len >= 1213,
+            "ciphertext length {ct_len} below engine MIN_CIPHERTEXT_LEN"
+        );
 
-        assert_eq!(decoded.sender, sender);
-        assert_eq!(decoded.nonce, 7);
-        assert_eq!(decoded.gas_limit, 42_000);
-        assert_eq!(decoded.chain_id, 31337);
-        assert_eq!(decoded.deadline, Some(1000));
-        assert!(
-            !decoded.signature.is_empty(),
-            "signature must be populated after build"
-        );
-        // FALCON verify against the sender's pubkey — exact check
-        // the server's `receive_tx_verified` runs.
-        let falcon_pk = FalconPublicKey::from_bytes(pk.as_bytes()).unwrap();
-        let sig_obj = FalconSignature::from_bytes(&decoded.signature).unwrap();
-        assert!(
-            falcon_verify(&falcon_pk, &decoded.hash(), &sig_obj),
-            "signature produced by WASM must verify against sender pubkey"
-        );
+        // We don't decode the inner Tx here — that requires the
+        // full threshold decrypt ceremony (key shares + FALCON sigs
+        // on each share + combine). The SDK's integration test
+        // exercises that path against a live devnet.
+        let _ = pk;
     }
 
     #[test]
