@@ -627,9 +627,9 @@ pub fn threshold_encrypt_wasm(pk_hex: &str, payload_hex: &str) -> Result<String,
 ///   "nonce": 0,                      // u64
 ///   "gasLimit": 100000,              // u64
 ///   "accessList": [                  // optional
-///     { "address": "0x...",
-///       "reads":  ["0x..."],
-///       "writes": ["0x..."] }
+///     { "address":     "0x...",
+///       "storageKeys": ["0x..."],
+///       "accessType":  0 }           // 0 = Read, 1 = ReadWrite
 ///   ],
 ///   "deadline": null,                // optional u64
 ///   "chainId": 31337,                // u64
@@ -1110,9 +1110,9 @@ mod tests {
     // ========== : serialize_one_access_entry hard-errors ==========
 
     /// : positive control — a well-formed access list with
-    /// canonical 32-byte address + reads + writes serializes
-    /// successfully and round-trips through the typed Rust
-    /// access-list encoder (i.e., the bytes are byte-identical
+    /// canonical 32-byte address + storageKeys + accessType
+    /// serializes successfully and round-trips through the typed
+    /// Rust access-list encoder (i.e., the bytes are byte-identical
     /// to what the validator computes from the typed
     /// `AccessEntry`).
     #[test]
