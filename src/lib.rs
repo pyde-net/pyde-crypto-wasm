@@ -424,21 +424,39 @@ fn serialize_access_list_entries(
     Ok(())
 }
 
-/// : hard-error on any malformed access-list entry field.
-/// Pre-fix this was infallible: a missing `address`, bad hex, or
-/// wrong-length address silently zero-filled to `[0u8; 32]`, and
-/// any individual `reads` / `writes` key that didn't decode to
-/// exactly 32 bytes was silently dropped via `filter_map`. A
-/// frontend SDK that mis-encoded a single key would receive back
-/// a tx whose access list disagreed with what the user intended,
-/// and the hash on the JS side would no longer match the hash
-/// the validator computed from the typed `AccessEntry`. The
-/// failure mode is "tx silently rejected on-chain after the
-/// wallet flow already showed a success" — the kind of bug that
-/// gets blamed on flaky infra instead of a wallet bug. Make
-/// every malformed-input path return an error so the wallet
-/// hits the failure synchronously, with a message naming the
-/// offending field.
+/// Borsh-encode one `AccessEntry`, matching the canonical
+/// `pyde_engine_types::AccessEntry` wire shape:
+///
+/// ```text
+/// address      : 32 raw bytes
+/// storage_keys : u32 LE count + entries × 32 bytes
+/// access_type  : 1-byte enum tag  (0 = Read, 1 = ReadWrite)
+/// ```
+///
+/// Expected JSON input shape:
+/// ```ignore
+/// {
+///   "address":     "0x<64 hex>",
+///   "storageKeys": ["0x<64 hex>", ...],
+///   "accessType":  0 | 1
+/// }
+/// ```
+///
+/// : hard-error on any malformed field. Pre-fix this was
+/// infallible: a missing `address`, bad hex, or wrong-length
+/// address silently zero-filled to `[0u8; 32]`, and any individual
+/// storage key that didn't decode to exactly 32 bytes was silently
+/// dropped via `filter_map`. A frontend SDK that mis-encoded a
+/// single key would receive back a tx whose access list disagreed
+/// with what the user intended, and the hash on the JS side would
+/// no longer match the hash the validator computed from the typed
+/// `AccessEntry`. The failure mode is "tx silently rejected
+/// on-chain after the wallet flow already showed a success" — the
+/// kind of bug that gets blamed on flaky infra instead of a wallet
+/// bug. Make every malformed-input path return an error so the
+/// wallet hits the failure synchronously, with a message naming
+/// the offending field.
+///
 /// The error type is `String` rather than `JsValue` so the
 /// helper is testable on native targets (constructing `JsValue`
 /// outside a wasm runtime aborts the process — see existing
@@ -462,47 +480,43 @@ fn serialize_one_access_entry(entry: &serde_json::Value, buf: &mut Vec<u8>) -> R
     }
     buf.extend_from_slice(&addr_bytes);
 
-    // Treat a missing field as an empty list (idiomatic JSON), but
-    // hard-error if the field is present and the wrong type, or
-    // any element is malformed.
-    let parse_keys = |field: &str| -> Result<Vec<[u8; 32]>, String> {
-        let arr = match entry.get(field) {
-            None => return Ok(Vec::new()),
-            Some(v) => v
-                .as_array()
-                .ok_or_else(|| format!("access list entry: `{field}` must be an array"))?,
-        };
-        let mut out = Vec::with_capacity(arr.len());
-        for (i, k) in arr.iter().enumerate() {
-            let s = k
-                .as_str()
-                .ok_or_else(|| format!("access list entry: `{field}[{i}]` must be a hex string"))?;
-            let b = hex::decode(s.trim_start_matches("0x"))
-                .map_err(|e| format!("access list entry: `{field}[{i}]`: bad hex: {e}"))?;
-            if b.len() != 32 {
-                return Err(format!(
-                    "access list entry: `{field}[{i}]` must be 32 bytes, got {}",
-                    b.len()
-                ));
-            }
-            let mut k32 = [0u8; 32];
-            k32.copy_from_slice(&b);
-            out.push(k32);
+    // storageKeys: required (use empty array for no slots — matches
+    // borsh's `Vec::default()`). Hard-error if missing or malformed.
+    let keys_arr = entry
+        .get("storageKeys")
+        .ok_or_else(|| "access list entry: `storageKeys` is required".to_string())?
+        .as_array()
+        .ok_or_else(|| "access list entry: `storageKeys` must be an array".to_string())?;
+    buf.extend_from_slice(&(keys_arr.len() as u32).to_le_bytes());
+    for (i, k) in keys_arr.iter().enumerate() {
+        let s = k
+            .as_str()
+            .ok_or_else(|| format!("access list entry: `storageKeys[{i}]` must be a hex string"))?;
+        let b = hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| format!("access list entry: `storageKeys[{i}]`: bad hex: {e}"))?;
+        if b.len() != 32 {
+            return Err(format!(
+                "access list entry: `storageKeys[{i}]` must be 32 bytes, got {}",
+                b.len()
+            ));
         }
-        Ok(out)
-    };
-
-    let reads = parse_keys("reads")?;
-    buf.extend_from_slice(&(reads.len() as u32).to_le_bytes());
-    for k in &reads {
-        buf.extend_from_slice(k);
+        buf.extend_from_slice(&b);
     }
 
-    let writes = parse_keys("writes")?;
-    buf.extend_from_slice(&(writes.len() as u32).to_le_bytes());
-    for k in &writes {
-        buf.extend_from_slice(k);
+    // accessType: required u8 enum tag.
+    //   0 = Read       — slot is only read; conflicts only with writes.
+    //   1 = ReadWrite  — slot may be written; conflicts with anything.
+    let access_type = entry
+        .get("accessType")
+        .ok_or_else(|| "access list entry: `accessType` is required".to_string())?
+        .as_u64()
+        .ok_or_else(|| "access list entry: `accessType` must be a u8 (0 or 1)".to_string())?;
+    if access_type > 1 {
+        return Err(format!(
+            "access list entry: `accessType` must be 0 (Read) or 1 (ReadWrite), got {access_type}"
+        ));
     }
+    buf.push(access_type as u8);
 
     Ok(())
 }
@@ -1105,16 +1119,45 @@ mod tests {
     fn serialize_one_access_entry_canonical_succeeds() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
-            "reads": [
+            "storageKeys": [
                 format!("0x{}", hex::encode([0x11u8; 32])),
                 format!("0x{}", hex::encode([0x22u8; 32])),
             ],
-            "writes": [format!("0x{}", hex::encode([0x33u8; 32]))],
+            "accessType": 1, // ReadWrite
         });
         let mut buf = Vec::new();
         serialize_one_access_entry(&entry, &mut buf).expect("canonical entry must serialize");
-        // address(32) + reads_len(4) + 2*key32 + writes_len(4) + 1*key32 = 136
-        assert_eq!(buf.len(), 32 + 4 + 64 + 4 + 32);
+        // address(32) + keys_len(4) + 2 × key(32) + access_type(1) = 101
+        assert_eq!(buf.len(), 32 + 4 + 64 + 1);
+        // Last byte is the accessType tag.
+        assert_eq!(buf[buf.len() - 1], 1);
+    }
+
+    /// `accessType: 0` (Read) tags the last byte as 0.
+    #[test]
+    fn serialize_one_access_entry_read_tag_succeeds() {
+        let entry = serde_json::json!({
+            "address": format!("0x{}", hex::encode([0xBBu8; 32])),
+            "storageKeys": [format!("0x{}", hex::encode([0x33u8; 32]))],
+            "accessType": 0,
+        });
+        let mut buf = Vec::new();
+        serialize_one_access_entry(&entry, &mut buf).expect("read-only entry must serialize");
+        assert_eq!(buf.len(), 32 + 4 + 32 + 1);
+        assert_eq!(buf[buf.len() - 1], 0);
+    }
+
+    /// Empty `storageKeys` is valid and emits a 4-byte zero count.
+    #[test]
+    fn serialize_one_access_entry_empty_keys_succeeds() {
+        let entry = serde_json::json!({
+            "address": format!("0x{}", hex::encode([0xAAu8; 32])),
+            "storageKeys": [],
+            "accessType": 0,
+        });
+        let mut buf = Vec::new();
+        serialize_one_access_entry(&entry, &mut buf).expect("empty-keys entry must serialize");
+        assert_eq!(buf.len(), 32 + 4 + 1); // address + 0-len keys + accessType
     }
 
     /// : a missing `address` field must hard-error rather
@@ -1125,8 +1168,8 @@ mod tests {
     #[test]
     fn serialize_one_access_entry_missing_address_errors() {
         let entry = serde_json::json!({
-            "reads": [],
-            "writes": [],
+            "storageKeys": [],
+            "accessType": 0,
         });
         let mut buf = Vec::new();
         let msg = serialize_one_access_entry(&entry, &mut buf).unwrap_err();
@@ -1142,66 +1185,81 @@ mod tests {
     fn serialize_one_access_entry_short_address_errors() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 16])),
-            "reads": [],
-            "writes": [],
+            "storageKeys": [],
+            "accessType": 0,
         });
         let mut buf = Vec::new();
         let msg = serialize_one_access_entry(&entry, &mut buf).unwrap_err();
         assert!(msg.contains("address must be 32 bytes"));
     }
 
-    /// : a malformed `reads` entry must hard-error and
-    /// name the offending index. Pre-fix, `filter_map` silently
-    /// dropped the bad key, so a frontend sending 5 keys with
-    /// the third one wrong got back a 4-key access list — the
-    /// hash on the wallet side then disagreed with the validator's
-    /// hash and the tx silently failed on-chain.
+    /// : a malformed storage key must hard-error and name
+    /// the offending index. Pre-fix, `filter_map` silently dropped
+    /// the bad key, so a frontend sending 5 keys with the third one
+    /// wrong got back a 4-key access list — the hash on the wallet
+    /// side then disagreed with the validator's hash and the tx
+    /// silently failed on-chain.
     #[test]
-    fn serialize_one_access_entry_short_read_key_errors() {
+    fn serialize_one_access_entry_short_storage_key_errors() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
-            "reads": [
+            "storageKeys": [
                 format!("0x{}", hex::encode([0x11u8; 32])),
                 format!("0x{}", hex::encode([0x22u8; 16])), // 16 bytes, wrong length
                 format!("0x{}", hex::encode([0x33u8; 32])),
             ],
-            "writes": [],
+            "accessType": 1,
         });
         let mut buf = Vec::new();
         let msg = serialize_one_access_entry(&entry, &mut buf).unwrap_err();
         assert!(
-            msg.contains("reads[1]") && msg.contains("32 bytes"),
+            msg.contains("storageKeys[1]") && msg.contains("32 bytes"),
             "expected error to name the offending key, got: {msg}"
         );
     }
 
-    /// : `writes` field present but not an array must
-    /// hard-error (pre-fix the field was silently treated as
-    /// empty via `as_array().unwrap_or_default()`).
+    /// `storageKeys` present but not an array must hard-error
+    /// (pre-fix the field was silently treated as empty via
+    /// `as_array().unwrap_or_default()`).
     #[test]
-    fn serialize_one_access_entry_writes_wrong_type_errors() {
+    fn serialize_one_access_entry_storage_keys_wrong_type_errors() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
-            "reads": [],
-            "writes": "not-an-array",
+            "storageKeys": "not-an-array",
+            "accessType": 0,
         });
         let mut buf = Vec::new();
         let msg = serialize_one_access_entry(&entry, &mut buf).unwrap_err();
-        assert!(msg.contains("writes") && msg.contains("array"));
+        assert!(msg.contains("storageKeys") && msg.contains("array"));
     }
 
-    /// : missing `reads` / `writes` is treated as empty
-    /// (idiomatic JSON), not an error. Frontends may legitimately
-    /// omit one or both fields when a contract only reads or
-    /// only writes.
+    /// `accessType` is required — frontends MUST decide whether the
+    /// entry is read-only or read-write at simulate-bucketing time.
+    /// Defaulting silently would route the entry through the wrong
+    /// admit-side conflict graph.
     #[test]
-    fn serialize_one_access_entry_missing_reads_writes_treated_as_empty() {
+    fn serialize_one_access_entry_missing_access_type_errors() {
         let entry = serde_json::json!({
             "address": format!("0x{}", hex::encode([0xAAu8; 32])),
+            "storageKeys": [],
         });
         let mut buf = Vec::new();
-        serialize_one_access_entry(&entry, &mut buf)
-            .expect("missing reads/writes must succeed (idiomatic empty)");
-        assert_eq!(buf.len(), 32 + 4 + 4); // address + 0-len reads + 0-len writes
+        let msg = serialize_one_access_entry(&entry, &mut buf).unwrap_err();
+        assert!(msg.contains("accessType"));
+    }
+
+    /// `accessType` out of range must hard-error. v1's `AccessType`
+    /// enum is { Read = 0, ReadWrite = 1 }; any other value is a
+    /// frontend bug we surface synchronously.
+    #[test]
+    fn serialize_one_access_entry_access_type_out_of_range_errors() {
+        let entry = serde_json::json!({
+            "address": format!("0x{}", hex::encode([0xAAu8; 32])),
+            "storageKeys": [],
+            "accessType": 2, // not a valid AccessType discriminant
+        });
+        let mut buf = Vec::new();
+        let msg = serialize_one_access_entry(&entry, &mut buf).unwrap_err();
+        assert!(msg.contains("accessType"));
     }
 }
