@@ -834,7 +834,7 @@ fn parse_hex_bytes(val: Option<&serde_json::Value>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyde_crypto::falcon::{falcon_keygen, falcon_verify, FalconPublicKey, FalconSignature};
+    use pyde_crypto::falcon::falcon_keygen;
     use pyde_crypto::threshold::threshold_keygen;
 
     #[test]
