@@ -783,6 +783,97 @@ pub fn build_raw_encrypted_tx_with_handle_wasm(
 }
 
 // ============================================================================
+// Committee-side threshold primitives
+// ============================================================================
+// Client-side encryption ships via `thresholdEncrypt` / `buildRawEncryptedTx`
+// above. These three expose the committee side — keygen + partial-decrypt +
+// combine — so a single party (e.g. the playground's in-browser sandbox) can
+// play the whole committee locally at n=1. The round-trip against the
+// underlying primitives is proven by `wasm_encrypt_then_real_decrypt_with_shares`;
+// the wrapper composition is proven by `wrappers_keygen_encrypt_share_combine_roundtrip`.
+
+/// Generate a threshold committee of `n` members with reconstruction
+/// `threshold`. Returns JSON `{ "thresholdPk": "0x..", "keyShares": ["0x..", ..] }`.
+/// `thresholdPk` is what clients encrypt against; each key share is a member's
+/// secret decryption material. The sandbox calls `thresholdKeygen(1, 1)`.
+#[wasm_bindgen(js_name = "thresholdKeygen")]
+pub fn threshold_keygen_wasm(n: usize, threshold: usize) -> Result<String, JsValue> {
+    let (tpk, shares) = pyde_crypto::threshold::threshold_keygen(n, threshold)
+        .map_err(|e| JsValue::from_str(&format!("threshold keygen failed: {}", e)))?;
+    let key_shares: Vec<String> = shares
+        .iter()
+        .map(|s| format!("0x{}", hex::encode(s.to_bytes())))
+        .collect();
+    let out = serde_json::json!({
+        "thresholdPk": format!("0x{}", hex::encode(tpk.to_bytes())),
+        "keyShares": key_shares,
+    });
+    Ok(out.to_string())
+}
+
+/// One committee member's partial decryption of a ciphertext. `key_share_hex`
+/// is one entry from `thresholdKeygen`; `ciphertext_hex` is the
+/// `ThresholdCiphertext` wire bytes (exactly what `thresholdEncrypt` returns);
+/// `falcon_sk_hex` is THAT member's FALCON secret key (each share is signed).
+/// Returns hex of the `DecryptionShare` wire bytes.
+#[wasm_bindgen(js_name = "generateDecryptionShare")]
+pub fn generate_decryption_share_wasm(
+    key_share_hex: &str,
+    ciphertext_hex: &str,
+    falcon_sk_hex: &str,
+) -> Result<String, JsValue> {
+    let ks = pyde_crypto::threshold::KeyShare::from_bytes(&decode_hex(key_share_hex)?)
+        .ok_or_else(|| JsValue::from_str("invalid key share"))?;
+    let ct =
+        pyde_crypto::threshold::ThresholdCiphertext::from_wire_bytes(&decode_hex(ciphertext_hex)?)
+            .ok_or_else(|| JsValue::from_str("invalid ciphertext"))?;
+    let sk = pyde_crypto::falcon::FalconSecretKey::from_bytes(&decode_hex(falcon_sk_hex)?)
+        .ok_or_else(|| JsValue::from_str("invalid falcon secret key"))?;
+    let share = pyde_crypto::threshold::generate_decryption_share(&ks, &ct, &sk)
+        .map_err(|e| JsValue::from_str(&format!("decryption share failed: {}", e)))?;
+    Ok(format!("0x{}", hex::encode(share.to_bytes())))
+}
+
+/// Combine a threshold of decryption shares to recover the plaintext.
+/// `shares_json` = JSON array of hex `DecryptionShare`s; `ciphertext_hex` = the
+/// same `ThresholdCiphertext` wire bytes; `committee_pks_json` = JSON array of
+/// hex FALCON public keys, positioned so `committee_pks[i]` is the member with
+/// key-share index `i + 1` (shares are FALCON-verified against this table).
+/// Returns hex of the recovered plaintext.
+#[wasm_bindgen(js_name = "combineShares")]
+pub fn combine_shares_wasm(
+    shares_json: &str,
+    threshold: usize,
+    ciphertext_hex: &str,
+    committee_pks_json: &str,
+) -> Result<String, JsValue> {
+    let share_hexes: Vec<String> = serde_json::from_str(shares_json)
+        .map_err(|e| JsValue::from_str(&format!("bad shares JSON: {}", e)))?;
+    let mut shares = Vec::with_capacity(share_hexes.len());
+    for h in &share_hexes {
+        shares.push(
+            pyde_crypto::threshold::DecryptionShare::from_bytes(&decode_hex(h)?)
+                .ok_or_else(|| JsValue::from_str("invalid decryption share"))?,
+        );
+    }
+    let ct =
+        pyde_crypto::threshold::ThresholdCiphertext::from_wire_bytes(&decode_hex(ciphertext_hex)?)
+            .ok_or_else(|| JsValue::from_str("invalid ciphertext"))?;
+    let pk_hexes: Vec<String> = serde_json::from_str(committee_pks_json)
+        .map_err(|e| JsValue::from_str(&format!("bad committee-keys JSON: {}", e)))?;
+    let mut pks = Vec::with_capacity(pk_hexes.len());
+    for h in &pk_hexes {
+        pks.push(
+            pyde_crypto::falcon::FalconPublicKey::from_bytes(&decode_hex(h)?)
+                .ok_or_else(|| JsValue::from_str("invalid falcon public key"))?,
+        );
+    }
+    let plaintext = pyde_crypto::threshold::combine_shares(&shares, threshold, &ct, &pks)
+        .map_err(|e| JsValue::from_str(&format!("combine failed: {}", e)))?;
+    Ok(format!("0x{}", hex::encode(plaintext)))
+}
+
+// ============================================================================
 // Hex helpers
 // ============================================================================
 
@@ -968,6 +1059,44 @@ mod tests {
         assert_eq!(
             plaintext, payload,
             "WASM-encrypt + real-decrypt-with-shares must round-trip the original payload"
+        );
+    }
+
+    /// The committee-side wrappers drive the whole flow the browser sandbox
+    /// runs at n=1: keygen → encrypt (existing wrapper) → one share → combine.
+    /// Happy-path only (a wrapper's `Err(JsValue)` can't unwind natively).
+    #[test]
+    fn wrappers_keygen_encrypt_share_combine_roundtrip() {
+        use pyde_crypto::falcon::falcon_keygen;
+
+        // 1-of-1 committee, exactly as the browser sandbox will run it.
+        let kg = threshold_keygen_wasm(1, 1).unwrap();
+        let kg: serde_json::Value = serde_json::from_str(&kg).unwrap();
+        let tpk_hex = kg["thresholdPk"].as_str().unwrap().to_string();
+        let key_share_hex = kg["keyShares"][0].as_str().unwrap().to_string();
+
+        // The single committee member's FALCON identity.
+        let (falcon_pk, falcon_sk) = falcon_keygen().unwrap();
+        let falcon_sk_hex = format!("0x{}", hex::encode(falcon_sk.as_bytes()));
+        let falcon_pk_hex = format!("0x{}", hex::encode(falcon_pk.as_bytes()));
+
+        // Client encrypts (existing wrapper). `thresholdEncrypt` returns the raw
+        // ThresholdCiphertext wire — feed it straight in (no envelope prefix).
+        let payload = b"browsernet encrypted-tx smoke";
+        let ct_hex =
+            threshold_encrypt_wasm(&tpk_hex, &format!("0x{}", hex::encode(payload))).unwrap();
+
+        // Committee member (played by the browser) decrypts.
+        let share_hex =
+            generate_decryption_share_wasm(&key_share_hex, &ct_hex, &falcon_sk_hex).unwrap();
+        let shares_json = serde_json::to_string(&vec![share_hex]).unwrap();
+        let pks_json = serde_json::to_string(&vec![falcon_pk_hex]).unwrap();
+
+        let out_hex = combine_shares_wasm(&shares_json, 1, &ct_hex, &pks_json).unwrap();
+        let recovered = hex::decode(out_hex.trim_start_matches("0x")).unwrap();
+        assert_eq!(
+            recovered, payload,
+            "wrapper round-trip must recover the plaintext"
         );
     }
 
