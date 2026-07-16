@@ -268,9 +268,9 @@ plus generated TypeScript declarations plus the JS glue.
 
 ## Bundle size + browser compat
 
-- **Compressed `.wasm`:** ~250 KB (FALCON + Kyber + Poseidon2 +
-  Blake3 + glue). Loadable on any browser since ~2018; specifically
-  needs WASM SIMD-free baseline.
+- **Compressed `.wasm`:** ~125 KB (FALCON + Poseidon2 + glue).
+  Loadable on any browser since ~2018; specifically needs a
+  WASM SIMD-free baseline.
 - **TypeScript declarations:** generated automatically by
   `wasm-pack`, no extra setup needed in consumers.
 - **No `node-gyp` / native bindings.** Pure WASM. Works in Cloudflare
@@ -284,11 +284,8 @@ browser path; production-ready for that path.
 
 **Known constraints:**
 - Single-threaded only
-- Bundled `ml-kem` is at `0.3.0-rc.0` — same as the underlying
-  [`pyde-crypto`](https://github.com/pyde-net/pyde-crypto) (upgrade
-  tracked post-NIST-stable)
 - No streaming-style API yet (everything is one-shot — fine for
-  transaction-signing, less ideal for very large payload encryption)
+  transaction-signing)
 
 ## Building from source
 
