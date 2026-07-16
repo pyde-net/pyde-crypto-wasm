@@ -5,6 +5,8 @@ license = "Apache-2.0"
 edition = "2021"
 description = "WASM bindings for Pyde cryptographic primitives"
 authors = ["zarah <zarah@pyde.network>"]
+repository = "https://github.com/pyde-net/pyde-crypto-wasm"
+homepage = "https://pyde.network"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
