@@ -90,7 +90,7 @@ fn key_table() -> &'static Mutex<KeyTable> {
 /// inside this crate's WASM heap and return only an opaque `u32`
 /// handle to JS — the SK bytes never enter the JS heap at all. For
 /// wallets that need to encrypt the SK to disk before discarding
-/// the in-memory copy (the typical `pyde-ts-sdk` / `wright`
+/// the in-memory copy (the typical `pyde-ts-sdk` / `otigen`
 /// keystore flow), this hex-string return is unavoidable, but
 /// callers MUST encrypt the value at the earliest opportunity and
 /// must NEVER let it survive across renders or get serialized.
