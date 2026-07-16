@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use wasm_bindgen::prelude::*;
 
 // ============================================================================
-// : opaque-handle keystore
+// opaque-handle keystore
 // ============================================================================
 //
 // `generate_keypair_handle` keeps the FALCON secret key inside this
@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 // memory snapshots, never survive in a crash dump as a recoverable
 // hex string, and never get accidentally logged.
 //
-// `FalconSecretKey` already derives `ZeroizeOnDrop` (), so
+// `FalconSecretKey` already derives `ZeroizeOnDrop`, so
 // removing the entry from the map (via `BTreeMap::remove` →
 // `Drop::drop`) actually zeroes the secret bytes in place.
 //
@@ -28,7 +28,7 @@ use wasm_bindgen::prelude::*;
 // thread-local plumbing, and the API stays callable from any
 // future worker context without additional setup.
 //
-// : backed by `BTreeMap<u32, FalconSecretKey>` rather than
+// backed by `BTreeMap<u32, FalconSecretKey>` rather than
 // `HashMap`. Two reasons:
 //   1. `HashMap`'s default `RandomState` hasher pulls per-process
 //      entropy from `getrandom`, which on wasm32 means an extra
@@ -41,7 +41,7 @@ use wasm_bindgen::prelude::*;
 //      insert / get / remove, so the ordering change is
 //      observable-equivalent today, but locks in deterministic
 //      behaviour ahead of any future iter use-site.
-// The  zeroize story is unchanged: `BTreeMap::remove`
+// The zeroize story is unchanged: `BTreeMap::remove`
 // returns the value by move, dropping it triggers `ZeroizeOnDrop`
 // identically to the previous `HashMap::remove` path.
 //
@@ -142,7 +142,7 @@ pub fn keypair_from_seed(seed_hex: &str) -> Result<String, JsValue> {
     Ok(result.to_string())
 }
 
-/// : opaque-handle variant of `generateKeypair`. Generates
+/// opaque-handle variant of `generateKeypair`. Generates
 /// a FALCON-512 keypair, retains the secret key inside this crate's
 /// WASM heap, and returns JSON with only the `publicKey`, `address`,
 /// and an opaque `handle: u32` to JS. The SK bytes never enter the
@@ -177,7 +177,7 @@ pub fn generate_keypair_handle() -> Result<String, JsValue> {
     Ok(result.to_string())
 }
 
-/// : sign a message using a key retained by handle. The
+/// sign a message using a key retained by handle. The
 /// SK bytes never leave this crate's WASM heap.
 /// Returns the signature as a `0x`-prefixed hex string.
 #[wasm_bindgen(js_name = "signMessageWithHandle")]
@@ -195,7 +195,7 @@ pub fn sign_message_with_handle(handle: u32, message_hex: &str) -> Result<String
     Ok(format!("0x{}", hex::encode(sig.as_bytes())))
 }
 
-/// : sign a transaction (same JSON shape as
+/// sign a transaction (same JSON shape as
 /// `signTransaction`) using a key retained by handle. Returns the
 /// signed wire bytes as `0x`-prefixed hex.
 #[wasm_bindgen(js_name = "signTransactionWithHandle")]
@@ -218,7 +218,7 @@ pub fn sign_transaction_with_handle(tx_json: &str, handle: u32) -> Result<String
     Ok(format!("0x{}", hex::encode(&tx_bytes)))
 }
 
-/// : drop a retained keypair. The `FalconSecretKey`'s
+/// drop a retained keypair. The `FalconSecretKey`'s
 /// `ZeroizeOnDrop` impl () overwrites the secret bytes in
 /// place when removed from the table. Returns `true` if a key was
 /// actually removed, `false` if the handle was already dropped.
@@ -357,7 +357,7 @@ fn compute_tx_hash(v: &serde_json::Value) -> Result<[u8; 32], JsValue> {
     let data = parse_hex_bytes(v.get("data"));
     let gas_limit = v.get("gasLimit").and_then(|v| v.as_u64()).unwrap_or(21000);
     let nonce = v.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-    // : chainId is REQUIRED. Pre-fix `unwrap_or(31337)`
+    // chainId is REQUIRED. Pre-fix `unwrap_or(31337)`
     // silently bound a missing-chainId tx to devnet, opening the
     // same cross-chain replay surface that /303 closed
     // on the RPC side: a wallet that omitted chainId on testnet
@@ -442,7 +442,7 @@ fn serialize_access_list_entries(
 /// }
 /// ```
 ///
-/// : hard-error on any malformed field. Pre-fix this was
+/// hard-error on any malformed field. Pre-fix this was
 /// infallible: a missing `address`, bad hex, or wrong-length
 /// address silently zero-filled to `[0u8; 32]`, and any individual
 /// storage key that didn't decode to exactly 32 bytes was silently
@@ -550,7 +550,7 @@ fn serialize_tx(v: &serde_json::Value, signature: &[u8]) -> Result<Vec<u8>, JsVa
     let data = parse_hex_bytes(v.get("data"));
     let gas_limit = v.get("gasLimit").and_then(|v| v.as_u64()).unwrap_or(21000);
     let nonce = v.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-    // : chainId required; see compute_tx_hash for rationale.
+    // chainId required; see compute_tx_hash for rationale.
     let chain_id = v
         .get("chainId")
         .and_then(|v| v.as_u64())
@@ -587,290 +587,6 @@ fn serialize_tx(v: &serde_json::Value, signature: &[u8]) -> Result<Vec<u8>, JsVa
     buf.extend_from_slice(&chain_id.to_le_bytes());
     buf.push(tx_type);
     Ok(buf)
-}
-
-// ============================================================================
-// Threshold encryption (MEV-protected tx flow)
-// ============================================================================
-
-/// Threshold-encrypt a payload against the committee's public key.
-/// `pk_hex` is the hex-encoded wire bytes from
-/// `pyde_getThresholdPublicKey`. `payload_hex` is the bytes to
-/// encrypt — typically `to (32) || value_le (16) || calldata`.
-/// Returns hex of `ThresholdCiphertext::to_wire_bytes()` ready to
-/// embed in an `EncryptedTx`.
-#[wasm_bindgen(js_name = "thresholdEncrypt")]
-pub fn threshold_encrypt_wasm(pk_hex: &str, payload_hex: &str) -> Result<String, JsValue> {
-    let pk_bytes = decode_hex(pk_hex)?;
-    let pk = pyde_crypto::threshold::ThresholdPublicKey::from_bytes(&pk_bytes)
-        .ok_or_else(|| JsValue::from_str("invalid threshold public key"))?;
-    let payload = decode_hex(payload_hex)?;
-    let ct = pyde_crypto::threshold::threshold_encrypt(&pk, &payload)
-        .map_err(|e| JsValue::from_str(&format!("threshold encryption failed: {}", e)))?;
-    Ok(format!("0x{}", hex::encode(ct.to_wire_bytes())))
-}
-
-/// One-shot client-side EncryptedTx builder. Does everything a
-/// wallet needs for the MEV-protected flow in a single call:
-///   1. Threshold-encrypt `(to || value_le || calldata)` with the
-///      committee pubkey.
-///   2. Assemble the EncryptedTx wire frame with `signature = []`.
-///   3. Compute `EncryptedTx::hash` (same formula the node uses).
-///   4. FALCON-sign the hash with the sender's secret key.
-///   5. Serialize the full wire frame.
-/// `params_json` shape (all strings are `0x`-prefixed hex unless
-/// noted):
-/// ```ignore
-/// {
-///   "thresholdPk": "0x...",          // wire bytes from pyde_getThresholdPublicKey
-///   "sender": "0x...",               // 32-byte address
-///   "nonce": 0,                      // u64
-///   "gasLimit": 100000,              // u64
-///   "accessList": [                  // optional
-///     { "address":     "0x...",
-///       "storageKeys": ["0x..."],
-///       "accessType":  0 }           // 0 = Read, 1 = ReadWrite
-///   ],
-///   "deadline": null,                // optional u64
-///   "chainId": 31337,                // u64
-///   "to": "0x...",                   // 32-byte address
-///   "value": "1000",                 // u128 decimal string
-///   "calldata": "0x..."              // hex bytes
-/// }
-/// ```
-/// Returns hex of the wire-encoded EncryptedTx, ready to submit via
-/// `pyde_sendRawEncryptedTransaction`.
-#[wasm_bindgen(js_name = "buildRawEncryptedTx")]
-pub fn build_raw_encrypted_tx_wasm(params_json: &str, sk_hex: &str) -> Result<String, JsValue> {
-    let v: serde_json::Value = serde_json::from_str(params_json)
-        .map_err(|e| JsValue::from_str(&format!("bad JSON: {}", e)))?;
-
-    let tpk_bytes = decode_hex(
-        v.get("thresholdPk")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| JsValue::from_str("missing thresholdPk"))?,
-    )?;
-    let tpk = pyde_crypto::threshold::ThresholdPublicKey::from_bytes(&tpk_bytes)
-        .ok_or_else(|| JsValue::from_str("invalid threshold public key"))?;
-
-    // Build the inner Tx JSON shape that compute_tx_hash + serialize_tx
-    // expect (field renames: sender→from, calldata→data; default txType
-    // to 0 = Standard).
-    let inner_tx_v = build_inner_tx_value(&v);
-
-    // FALCON-sign the inner Tx hash with the sender's SK.
-    let sk_bytes = decode_hex(sk_hex)?;
-    let sk = pyde_crypto::falcon::FalconSecretKey::from_bytes(&sk_bytes)
-        .ok_or_else(|| JsValue::from_str("invalid secret key"))?;
-    let signature = sign_inner_tx(&inner_tx_v, &sk)?;
-
-    // borsh-serialize the signed inner Tx and threshold-encrypt it.
-    let plaintext = serialize_tx(&inner_tx_v, &signature)?;
-    let envelope_bytes = encrypt_and_wrap_envelope(&tpk, &plaintext)?;
-    Ok(format!("0x{}", hex::encode(&envelope_bytes)))
-}
-
-/// Project `EncryptedTxParams` JSON onto the inner-Tx shape
-/// `compute_tx_hash` + `serialize_tx` consume. Renames `sender→from`
-/// and `calldata→data`; defaults `txType` to `0` (Standard) since
-/// encrypted submission is currently only used for transfers and
-/// generic contract calls.
-fn build_inner_tx_value(v: &serde_json::Value) -> serde_json::Value {
-    let mut out = serde_json::Map::new();
-    if let Some(x) = v.get("sender") {
-        out.insert("from".to_string(), x.clone());
-    }
-    for k in [
-        "to",
-        "value",
-        "gasLimit",
-        "nonce",
-        "chainId",
-        "deadline",
-        "accessList",
-    ] {
-        if let Some(x) = v.get(k) {
-            out.insert(k.to_string(), x.clone());
-        }
-    }
-    // calldata → data; explicit txType wins over the Standard default.
-    let data = v
-        .get("data")
-        .or_else(|| v.get("calldata"))
-        .cloned()
-        .unwrap_or_else(|| serde_json::Value::String("0x".to_string()));
-    out.insert("data".to_string(), data);
-    let tx_type = v
-        .get("txType")
-        .cloned()
-        .unwrap_or(serde_json::Value::Number(serde_json::Number::from(0)));
-    out.insert("txType".to_string(), tx_type);
-    serde_json::Value::Object(out)
-}
-
-fn sign_inner_tx(
-    inner_tx_v: &serde_json::Value,
-    sk: &pyde_crypto::falcon::FalconSecretKey,
-) -> Result<Vec<u8>, JsValue> {
-    let hash = compute_tx_hash(inner_tx_v)?;
-    let sig = pyde_crypto::falcon::falcon_sign(sk, &hash)
-        .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
-    Ok(sig.as_bytes().to_vec())
-}
-
-/// Threshold-encrypt the borsh-serialized inner Tx and wrap into the
-/// engine's `EncryptedTxEnvelope` wire shape (catalog: `version: u8 ||
-/// borsh(ciphertext: Vec<u8>)`). Returns the borsh-serialized envelope
-/// bytes ready to hex-encode.
-fn encrypt_and_wrap_envelope(
-    tpk: &pyde_crypto::threshold::ThresholdPublicKey,
-    plaintext: &[u8],
-) -> Result<Vec<u8>, JsValue> {
-    let ct = pyde_crypto::threshold::threshold_encrypt(tpk, plaintext)
-        .map_err(|e| JsValue::from_str(&format!("threshold encryption failed: {}", e)))?;
-    let ct_wire_bytes = ct.to_wire_bytes();
-    // EncryptedTxEnvelope { version: u8, ciphertext: Vec<u8> } — borsh
-    // serialises Vec<T> as `u32 LE length || items`.
-    let mut buf = Vec::with_capacity(1 + 4 + ct_wire_bytes.len());
-    buf.push(1u8); // EncryptedTxEnvelope::VERSION
-    buf.extend_from_slice(&(ct_wire_bytes.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&ct_wire_bytes);
-    Ok(buf)
-}
-
-/// Handle-based variant of `buildRawEncryptedTx`. Same `params_json`
-/// shape + same wire-format output, but signs using a key retained in
-/// the handle table — the FALCON secret key never leaves this crate's
-/// WASM heap. Use with the keypair from `generateKeypairHandle`.
-///
-/// Mirrors the signing handle pattern of `signMessageWithHandle` and
-/// `signTransactionWithHandle`.
-#[wasm_bindgen(js_name = "buildRawEncryptedTxWithHandle")]
-pub fn build_raw_encrypted_tx_with_handle_wasm(
-    params_json: &str,
-    handle: u32,
-) -> Result<String, JsValue> {
-    let v: serde_json::Value = serde_json::from_str(params_json)
-        .map_err(|e| JsValue::from_str(&format!("bad JSON: {}", e)))?;
-
-    let tpk_bytes = decode_hex(
-        v.get("thresholdPk")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| JsValue::from_str("missing thresholdPk"))?,
-    )?;
-    let tpk = pyde_crypto::threshold::ThresholdPublicKey::from_bytes(&tpk_bytes)
-        .ok_or_else(|| JsValue::from_str("invalid threshold public key"))?;
-
-    let inner_tx_v = build_inner_tx_value(&v);
-
-    // Compute the hash + sign via the handle table.
-    let hash = compute_tx_hash(&inner_tx_v)?;
-    let signature = {
-        let table = key_table()
-            .lock()
-            .map_err(|_| JsValue::from_str("internal: key table mutex poisoned ()"))?;
-        let sk = table.keys.get(&handle).ok_or_else(|| {
-            JsValue::from_str("handle not found (already dropped or never created)")
-        })?;
-        let sig = pyde_crypto::falcon::falcon_sign(sk, &hash)
-            .map_err(|e| JsValue::from_str(&format!("sign failed: {}", e)))?;
-        sig.as_bytes().to_vec()
-    };
-
-    let plaintext = serialize_tx(&inner_tx_v, &signature)?;
-    let envelope_bytes = encrypt_and_wrap_envelope(&tpk, &plaintext)?;
-    Ok(format!("0x{}", hex::encode(&envelope_bytes)))
-}
-
-// ============================================================================
-// Committee-side threshold primitives
-// ============================================================================
-// Client-side encryption ships via `thresholdEncrypt` / `buildRawEncryptedTx`
-// above. These three expose the committee side — keygen + partial-decrypt +
-// combine — so a single party (e.g. the playground's in-browser sandbox) can
-// play the whole committee locally at n=1. The round-trip against the
-// underlying primitives is proven by `wasm_encrypt_then_real_decrypt_with_shares`;
-// the wrapper composition is proven by `wrappers_keygen_encrypt_share_combine_roundtrip`.
-
-/// Generate a threshold committee of `n` members with reconstruction
-/// `threshold`. Returns JSON `{ "thresholdPk": "0x..", "keyShares": ["0x..", ..] }`.
-/// `thresholdPk` is what clients encrypt against; each key share is a member's
-/// secret decryption material. The sandbox calls `thresholdKeygen(1, 1)`.
-#[wasm_bindgen(js_name = "thresholdKeygen")]
-pub fn threshold_keygen_wasm(n: usize, threshold: usize) -> Result<String, JsValue> {
-    let (tpk, shares) = pyde_crypto::threshold::threshold_keygen(n, threshold)
-        .map_err(|e| JsValue::from_str(&format!("threshold keygen failed: {}", e)))?;
-    let key_shares: Vec<String> = shares
-        .iter()
-        .map(|s| format!("0x{}", hex::encode(s.to_bytes())))
-        .collect();
-    let out = serde_json::json!({
-        "thresholdPk": format!("0x{}", hex::encode(tpk.to_bytes())),
-        "keyShares": key_shares,
-    });
-    Ok(out.to_string())
-}
-
-/// One committee member's partial decryption of a ciphertext. `key_share_hex`
-/// is one entry from `thresholdKeygen`; `ciphertext_hex` is the
-/// `ThresholdCiphertext` wire bytes (exactly what `thresholdEncrypt` returns);
-/// `falcon_sk_hex` is THAT member's FALCON secret key (each share is signed).
-/// Returns hex of the `DecryptionShare` wire bytes.
-#[wasm_bindgen(js_name = "generateDecryptionShare")]
-pub fn generate_decryption_share_wasm(
-    key_share_hex: &str,
-    ciphertext_hex: &str,
-    falcon_sk_hex: &str,
-) -> Result<String, JsValue> {
-    let ks = pyde_crypto::threshold::KeyShare::from_bytes(&decode_hex(key_share_hex)?)
-        .ok_or_else(|| JsValue::from_str("invalid key share"))?;
-    let ct =
-        pyde_crypto::threshold::ThresholdCiphertext::from_wire_bytes(&decode_hex(ciphertext_hex)?)
-            .ok_or_else(|| JsValue::from_str("invalid ciphertext"))?;
-    let sk = pyde_crypto::falcon::FalconSecretKey::from_bytes(&decode_hex(falcon_sk_hex)?)
-        .ok_or_else(|| JsValue::from_str("invalid falcon secret key"))?;
-    let share = pyde_crypto::threshold::generate_decryption_share(&ks, &ct, &sk)
-        .map_err(|e| JsValue::from_str(&format!("decryption share failed: {}", e)))?;
-    Ok(format!("0x{}", hex::encode(share.to_bytes())))
-}
-
-/// Combine a threshold of decryption shares to recover the plaintext.
-/// `shares_json` = JSON array of hex `DecryptionShare`s; `ciphertext_hex` = the
-/// same `ThresholdCiphertext` wire bytes; `committee_pks_json` = JSON array of
-/// hex FALCON public keys, positioned so `committee_pks[i]` is the member with
-/// key-share index `i + 1` (shares are FALCON-verified against this table).
-/// Returns hex of the recovered plaintext.
-#[wasm_bindgen(js_name = "combineShares")]
-pub fn combine_shares_wasm(
-    shares_json: &str,
-    threshold: usize,
-    ciphertext_hex: &str,
-    committee_pks_json: &str,
-) -> Result<String, JsValue> {
-    let share_hexes: Vec<String> = serde_json::from_str(shares_json)
-        .map_err(|e| JsValue::from_str(&format!("bad shares JSON: {}", e)))?;
-    let mut shares = Vec::with_capacity(share_hexes.len());
-    for h in &share_hexes {
-        shares.push(
-            pyde_crypto::threshold::DecryptionShare::from_bytes(&decode_hex(h)?)
-                .ok_or_else(|| JsValue::from_str("invalid decryption share"))?,
-        );
-    }
-    let ct =
-        pyde_crypto::threshold::ThresholdCiphertext::from_wire_bytes(&decode_hex(ciphertext_hex)?)
-            .ok_or_else(|| JsValue::from_str("invalid ciphertext"))?;
-    let pk_hexes: Vec<String> = serde_json::from_str(committee_pks_json)
-        .map_err(|e| JsValue::from_str(&format!("bad committee-keys JSON: {}", e)))?;
-    let mut pks = Vec::with_capacity(pk_hexes.len());
-    for h in &pk_hexes {
-        pks.push(
-            pyde_crypto::falcon::FalconPublicKey::from_bytes(&decode_hex(h)?)
-                .ok_or_else(|| JsValue::from_str("invalid falcon public key"))?,
-        );
-    }
-    let plaintext = pyde_crypto::threshold::combine_shares(&shares, threshold, &ct, &pks)
-        .map_err(|e| JsValue::from_str(&format!("combine failed: {}", e)))?;
-    Ok(format!("0x{}", hex::encode(plaintext)))
 }
 
 // ============================================================================
@@ -914,193 +630,17 @@ fn parse_hex_bytes(val: Option<&serde_json::Value>) -> Vec<u8> {
 }
 
 // ============================================================================
-// Tests — format parity against the production EncryptedTx decoder.
+// Tests
 // ============================================================================
 //
-// These run only on the native target (not in the wasm bundle). The
-// assertion is: wire bytes produced by our inlined WASM builder must
-// decode cleanly with the canonical `pyde_rust_sdk::encrypted_wire`
-// decoder, with every field intact. This catches silent format drift
-// between the two inlined copies.
+// These run only on the native target (not in the wasm bundle). They
+// cover opaque-handle key retention (the FALCON secret key never leaves
+// the WASM heap) and wire-format parity for transaction serialization
+// against the canonical `pyde_rust_sdk` encoder.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyde_crypto::falcon::falcon_keygen;
-    use pyde_crypto::threshold::threshold_keygen;
-
-    #[test]
-    fn build_raw_encrypted_tx_emits_envelope_shape() {
-        // Verify the output matches the engine's `EncryptedTxEnvelope`
-        // wire shape: `[version: u8][ciphertext_len: u32 LE][ciphertext: bytes]`.
-        // The engine's admit-check enforces this shape; full
-        // round-trip (decrypt → inner Tx → FALCON verify) is owned by
-        // the SDK's live integration tests.
-        let (tpk, _shares) = threshold_keygen(4, 3).unwrap();
-        let (pk, sk) = falcon_keygen().unwrap();
-        let sender = poseidon2_hash(pk.as_bytes()).to_bytes();
-        let to = [0xBBu8; 32];
-
-        let params = serde_json::json!({
-            "thresholdPk": format!("0x{}", hex::encode(tpk.to_bytes())),
-            "sender":      format!("0x{}", hex::encode(sender)),
-            "nonce":       7u64,
-            "gasLimit":    42_000u64,
-            "chainId":     31337u64,
-            "deadline":    1000u64,
-            "to":          format!("0x{}", hex::encode(to)),
-            "value":       "99",
-            "calldata":    format!("0x{}", hex::encode(b"hello encrypted")),
-        });
-        let sk_hex = format!("0x{}", hex::encode(sk.as_bytes()));
-
-        let wire_hex = build_raw_encrypted_tx_wasm(&params.to_string(), &sk_hex).unwrap();
-        let wire_bytes = hex::decode(wire_hex.trim_start_matches("0x")).unwrap();
-
-        // Version byte = EncryptedTxEnvelope::VERSION (= 1 in v1).
-        assert_eq!(wire_bytes[0], 1, "envelope version byte must be 1");
-        // u32 LE length prefix matches the actual ciphertext length.
-        let ct_len = u32::from_le_bytes(wire_bytes[1..5].try_into().unwrap()) as usize;
-        assert_eq!(
-            wire_bytes.len(),
-            1 + 4 + ct_len,
-            "envelope total = version (1) + len prefix (4) + ciphertext ({ct_len})"
-        );
-        // Floor: a real Kyber-768 ciphertext is at least
-        // MIN_CIPHERTEXT_LEN bytes per the engine's admit check.
-        // 1184 (Kyber-768 ct) + 12 (Poly1305 nonce) + 16 (tag) + 1 = 1213.
-        // The pyde-crypto wire format adds two u32 length prefixes
-        // (4 + 4 bytes) and a 32-byte MAC, totalling ≥ 1255.
-        assert!(
-            ct_len >= 1213,
-            "ciphertext length {ct_len} below engine MIN_CIPHERTEXT_LEN"
-        );
-
-        // We don't decode the inner Tx here — that requires the
-        // full threshold decrypt ceremony (key shares + FALCON sigs
-        // on each share + combine). The SDK's integration test
-        // exercises that path against a live devnet.
-        let _ = pk;
-    }
-
-    #[test]
-    fn threshold_encrypt_primitive_roundtrips() {
-        // Encrypt via WASM primitive, decode via real
-        // ThresholdCiphertext::from_wire_bytes.
-        let (tpk, _) = threshold_keygen(4, 3).unwrap();
-        let payload = b"plaintext for primitive test";
-
-        let ct_hex = threshold_encrypt_wasm(
-            &format!("0x{}", hex::encode(tpk.to_bytes())),
-            &format!("0x{}", hex::encode(payload)),
-        )
-        .unwrap();
-        let ct_bytes = hex::decode(ct_hex.trim_start_matches("0x")).unwrap();
-
-        let decoded = pyde_crypto::threshold::ThresholdCiphertext::from_wire_bytes(&ct_bytes)
-            .expect("real decoder must accept WASM threshold_encrypt output");
-        assert_eq!(decoded.encrypted_len(), payload.len());
-    }
-
-    /// REGRESSION GUARD for the bombard 100% encrypted-tx drop.
-    /// The existing `threshold_encrypt_primitive_roundtrips` test
-    /// only verifies that the WASM-produced ciphertext bytes can
-    /// be DECODED by the real wire-format reader. It does NOT
-    /// verify that the ciphertext can actually be DECRYPTED back
-    /// to the original payload using threshold shares — exactly
-    /// the path the validator committee runs at canonical-apply.
-    /// That gap is what let the WASM ship producing ciphertexts
-    /// that decoded fine but failed the MAC check 100% of the
-    /// time.
-    /// This test closes that gap: encrypt via WASM, decode via
-    /// the real reader, generate decryption shares from the
-    /// committee shares, combine them, and assert the recovered
-    /// plaintext matches the original.
-    #[test]
-    fn wasm_encrypt_then_real_decrypt_with_shares() {
-        let (tpk, key_shares) = threshold_keygen(4, 3).unwrap();
-        let payload = b"end-to-end encrypt-then-decrypt-with-shares smoke test";
-
-        // WASM-side encryption — same path the TS bombard / SDK
-        // uses through `threshold_encrypt` / `buildRawEncryptedTx`.
-        let ct_hex = threshold_encrypt_wasm(
-            &format!("0x{}", hex::encode(tpk.to_bytes())),
-            &format!("0x{}", hex::encode(payload)),
-        )
-        .unwrap();
-        let ct_bytes = hex::decode(ct_hex.trim_start_matches("0x")).unwrap();
-        let ct = pyde_crypto::threshold::ThresholdCiphertext::from_wire_bytes(&ct_bytes)
-            .expect("real decoder must accept WASM ciphertext");
-
-        // : each decryption share is FALCON-signed; mint a
-        // committee of fresh keypairs whose pk vector indexes match
-        // the share-index assignment.
-        let mut falcon_pks = Vec::with_capacity(4);
-        let mut falcon_sks = Vec::with_capacity(4);
-        for _ in 0..4 {
-            let (pk, sk) = pyde_crypto::falcon::falcon_keygen().unwrap();
-            falcon_pks.push(pk);
-            falcon_sks.push(sk);
-        }
-
-        // Validator-side: every share-holder produces a decryption
-        // share for this ciphertext, then any THRESHOLD of them
-        // combine to recover plaintext. Mirrors the on-chain
-        // `BlockDecryptor::decrypt_all` flow, minus the FALCON
-        // re-verify and tx-execution scaffolding.
-        let shares: Vec<pyde_crypto::threshold::DecryptionShare> = key_shares[..3]
-            .iter()
-            .enumerate()
-            .map(|(i, ks)| {
-                pyde_crypto::threshold::generate_decryption_share(ks, &ct, &falcon_sks[i]).unwrap()
-            })
-            .collect();
-        let plaintext = pyde_crypto::threshold::combine_shares(&shares, 3, &ct, &falcon_pks)
-            .expect("WASM ciphertext must decrypt with real shares");
-        assert_eq!(
-            plaintext, payload,
-            "WASM-encrypt + real-decrypt-with-shares must round-trip the original payload"
-        );
-    }
-
-    /// The committee-side wrappers drive the whole flow the browser sandbox
-    /// runs at n=1: keygen → encrypt (existing wrapper) → one share → combine.
-    /// Happy-path only (a wrapper's `Err(JsValue)` can't unwind natively).
-    #[test]
-    fn wrappers_keygen_encrypt_share_combine_roundtrip() {
-        use pyde_crypto::falcon::falcon_keygen;
-
-        // 1-of-1 committee, exactly as the browser sandbox will run it.
-        let kg = threshold_keygen_wasm(1, 1).unwrap();
-        let kg: serde_json::Value = serde_json::from_str(&kg).unwrap();
-        let tpk_hex = kg["thresholdPk"].as_str().unwrap().to_string();
-        let key_share_hex = kg["keyShares"][0].as_str().unwrap().to_string();
-
-        // The single committee member's FALCON identity.
-        let (falcon_pk, falcon_sk) = falcon_keygen().unwrap();
-        let falcon_sk_hex = format!("0x{}", hex::encode(falcon_sk.as_bytes()));
-        let falcon_pk_hex = format!("0x{}", hex::encode(falcon_pk.as_bytes()));
-
-        // Client encrypts (existing wrapper). `thresholdEncrypt` returns the raw
-        // ThresholdCiphertext wire — feed it straight in (no envelope prefix).
-        let payload = b"browsernet encrypted-tx smoke";
-        let ct_hex =
-            threshold_encrypt_wasm(&tpk_hex, &format!("0x{}", hex::encode(payload))).unwrap();
-
-        // Committee member (played by the browser) decrypts.
-        let share_hex =
-            generate_decryption_share_wasm(&key_share_hex, &ct_hex, &falcon_sk_hex).unwrap();
-        let shares_json = serde_json::to_string(&vec![share_hex]).unwrap();
-        let pks_json = serde_json::to_string(&vec![falcon_pk_hex]).unwrap();
-
-        let out_hex = combine_shares_wasm(&shares_json, 1, &ct_hex, &pks_json).unwrap();
-        let recovered = hex::decode(out_hex.trim_start_matches("0x")).unwrap();
-        assert_eq!(
-            recovered, payload,
-            "wrapper round-trip must recover the plaintext"
-        );
-    }
-
-    // Negative-path testing (invalid threshold pubkey, bad hex, etc.)
+    // Negative-path testing (bad hex, malformed JSON, etc.)
     // is not run natively here: the workspace profile uses
     // `panic = "abort"`, and `wasm_bindgen` functions cannot unwind a
     // `JsValue` error across the FFI boundary on non-wasm targets —
@@ -1108,7 +648,7 @@ mod tests {
     // These paths are exercised end-to-end via the `pyde-ts-sdk` jest
     // suite once the wasm bundle is rebuilt.
 
-    // ========== : opaque-handle key retention ==========
+    // ========== opaque-handle key retention ==========
 
     /// `generateKeypairHandle` returns a JSON object that does NOT
     /// expose the secret key — only `publicKey`, `address`, and the
@@ -1204,12 +744,10 @@ mod tests {
         let _ = drop_keypair(h_b);
     }
 
-    // ========== : chainId is required ==========
+    // ========== chainId is required ==========
 
-    /// Happy-path regression: chainId provided → tx hash produced
-    /// (the existing `build_raw_encrypted_tx_decodes_with_production_decoder`
-    /// covers this for the encrypted path; this test pins the plain
-    /// `hashTransaction` path).
+    /// Happy-path regression: chainId provided → tx hash produced.
+    /// Pins the plain `hashTransaction` path.
     #[test]
     fn chain_id_required_happy_path() {
         let tx = serde_json::json!({
@@ -1236,9 +774,9 @@ mod tests {
         assert_ne!(hash_hex, hash2, "chainId must be part of the tx digest",);
     }
 
-    // ========== : serialize_one_access_entry hard-errors ==========
+    // ========== serialize_one_access_entry hard-errors ==========
 
-    /// : positive control — a well-formed access list with
+    /// positive control — a well-formed access list with
     /// canonical 32-byte address + storageKeys + accessType
     /// serializes successfully and round-trips through the typed
     /// Rust access-list encoder (i.e., the bytes are byte-identical
@@ -1289,7 +827,7 @@ mod tests {
         assert_eq!(buf.len(), 32 + 4 + 1); // address + 0-len keys + accessType
     }
 
-    /// : a missing `address` field must hard-error rather
+    /// a missing `address` field must hard-error rather
     /// than silently zero-fill. Pre-fix, an absent `address`
     /// produced a serialized entry whose first 32 bytes were the
     /// zero address — silently shadowing whichever zero-address
@@ -1308,7 +846,7 @@ mod tests {
         );
     }
 
-    /// : a wrong-length `address` (here 16 bytes after
+    /// a wrong-length `address` (here 16 bytes after
     /// hex decode) must hard-error.
     #[test]
     fn serialize_one_access_entry_short_address_errors() {
@@ -1322,7 +860,7 @@ mod tests {
         assert!(msg.contains("address must be 32 bytes"));
     }
 
-    /// : a malformed storage key must hard-error and name
+    /// a malformed storage key must hard-error and name
     /// the offending index. Pre-fix, `filter_map` silently dropped
     /// the bad key, so a frontend sending 5 keys with the third one
     /// wrong got back a 4-key access list — the hash on the wallet
